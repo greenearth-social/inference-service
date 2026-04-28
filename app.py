@@ -89,6 +89,20 @@ _models: Dict[str, LoadedModel] = {}
 # -------------------------
 # API schema
 # -------------------------
+
+
+def _validate_single_user_history(history_embedding: list[list[float]]) -> None:
+    first_len = len(history_embedding[0])
+    if first_len == 0:
+        raise ValueError("embedding dimension must be greater than 0")
+    if GE_INFERENCE_EMBED_DIM:
+        if not all(len(history_post) == GE_INFERENCE_EMBED_DIM for history_post in history_embedding):
+            raise ValueError(f"embedding dim must be {GE_INFERENCE_EMBED_DIM} for all history embeddings")
+    else:
+        if not all(len(history_post) == first_len for history_post in history_embedding):
+            raise ValueError(f"all history embeddings must have the same dimension as one another")
+
+
 class UserTowerPredictRequest(BaseModel):
     # history_embeddings: [T, D] or [B, T, D]
     history_embeddings: Union[List[List[float]], List[List[List[float]]]]
@@ -96,36 +110,34 @@ class UserTowerPredictRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
         he = self.history_embeddings
-
-        # An empty-list is ok - will be handled as a zero-length-history.
-        if isinstance(he, list) and len(he) == 0:
-            return self
-
-        # Determine shape: [T, D] vs [B, T, D]
-        if isinstance(he[0], list) and len(he[0]) > 0 and not isinstance(he[0][0], list):
-            # [T, D]
-            # Confirm all rows have the same embedding dim
-            d0 = len(he[0])
-            if d0 == 0:
-                raise ValueError("history_embeddings must have non-zero embedding dimension")
-            if not all(isinstance(row, list) and len(row) == d0 for row in he):
-                raise ValueError("history_embeddings must all have the same embedding dimension")
-            batch = 1
+        if not isinstance(he, list):
+            raise ValueError("history_embeddings must be a list")
+        if len(he) == 0: 
+            return self # [] (dim: [0]) <- treat as a single empty history
+        if not isinstance(he[0], list):
+            raise ValueError("history_embeddings must be a list of lists")
+        if len(he) == 1 and len(he[0]) == 0: 
+            return self # [[]] (dim: [1, 0]) <- treat as a single empty history
+        
+        # Handle the non (fully) empty cases:
+        if isinstance(he[0][0], float):
+            # assume no batching, a single history, a list of list of floats
+            _validate_single_user_history(he)
+            return self # [[float, float, ...]] (dim: [T, D]) <- a single history, a list of list of floats
         else:
-            # [B, T, D]
-            batch = len(he)
-            if batch > GE_INFERENCE_MAX_BATCH:
-                raise ValueError(f"batch too large (max={GE_INFERENCE_MAX_BATCH})")
-            if not (isinstance(he[0], list) and len(he[0]) > 0 and isinstance(he[0][0], list)):
-                raise ValueError("history_embeddings must have 2 (non-batched) or 3 (batched) dimensions")
-            d0 = len(he[0][0])
-            if d0 == 0:
-                raise ValueError("history_embeddings must have non-zero embedding dimension")
-            
-        if GE_INFERENCE_EMBED_DIM and d0 != GE_INFERENCE_EMBED_DIM:
-            raise ValueError(f"expected D={GE_INFERENCE_EMBED_DIM}, got D={d0}")
-
-        return self
+            # assume batching, a list of list of lists
+            # but have to account for the possibility of empty entries in the batch. which could be [] or [[]]
+            if len(he) > GE_INFERENCE_MAX_BATCH:
+                raise ValueError(f"batch too large! got={len(he)}; max={GE_INFERENCE_MAX_BATCH})")
+            for user in he:
+                if not isinstance(user, list):
+                    raise ValueError("each user's history must be a list")
+                if len(user) == 0 or (len(user) == 1 and isinstance(user[0], list) and len(user[0]) == 0):
+                    continue # empty history, which is ok
+                if not isinstance(user[0], list):
+                    raise ValueError("each (non-empty) user's history must be a list of lists")
+                _validate_single_user_history(user)
+            return self
 
 
 class PostTowerPredictRequest(BaseModel):
