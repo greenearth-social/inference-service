@@ -11,5 +11,8 @@ clearml = "*"
 google-cloud-storage = "*"
 shared = {git = "https://github.com/greenearth-social/engagement-prediction.git", ref = "main"}
 
+[dev-packages]
+pytest = "*"
+
 [requires]
 python_version = "3.13"

@@ -91,6 +91,25 @@ _models: Dict[str, LoadedModel] = {}
 # -------------------------
 
 
+HistoryEmbeddingsShape = Literal["single_empty", "single_history", "batched_history"]
+
+
+def _classify_history_embeddings_shape(history_embeddings: Any) -> HistoryEmbeddingsShape:
+    if not isinstance(history_embeddings, list):
+        raise ValueError("history_embeddings must be a list")
+    if len(history_embeddings) == 0:
+        return "single_empty"
+    if not isinstance(history_embeddings[0], list):
+        raise ValueError("history_embeddings must be a list of lists")
+    if len(history_embeddings[0]) == 0:
+        if len(history_embeddings) == 1:
+            return "single_empty"
+        return "batched_history"
+    if isinstance(history_embeddings[0][0], list):
+        return "batched_history"
+    return "single_history"
+
+
 def _validate_single_user_history(user_history: list[list[float]]) -> None:
     first_len = len(user_history[0])
     if first_len == 0:
@@ -124,28 +143,19 @@ class UserTowerPredictRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
         he = self.history_embeddings
-        if not isinstance(he, list):
-            raise ValueError("history_embeddings must be a list")
-        if len(he) == 0: 
-            return self # [] (dim: [0]) <- treat as a single empty history
-        if not isinstance(he[0], list):
-            raise ValueError("history_embeddings must be a list of lists")
-        
-        if len(he[0]) == 0: 
-            if len(he) == 1:
-                return self # [[]] (dim: [1, 0]) <- treat as a single empty history
-            else:
-                # assume batching, a list of list of lists
+        shape = _classify_history_embeddings_shape(he)
+
+        match shape:
+            case "single_empty":
+                return self
+            case "single_history":
+                _validate_single_user_history(he)
+                return self
+            case "batched_history":
                 _validate_batched_user_history(he)
-                return self # [[float, float, ...], [float, float, ...], ...] (dim: [B, T, D]) <- a batch of histories, a list of list of list of floats
-        elif isinstance(he[0][0], list):
-            # assume batching, a list of list of lists
-            _validate_batched_user_history(he)
-            return self # [[float, float, ...], [float, float, ...], ...] (dim: [B, T, D]) <- a batch of histories, a list of list of list of floats
-        else:
-            # assume no batching, a single history, a list of list of floats
-            _validate_single_user_history(he)
-            return self # [[float, float, ...]] (dim: [T, D]) <- a single history, a list of list of floats
+                return self
+            case _:
+                assert_never(shape)
 
 
 class PostTowerPredictRequest(BaseModel):
