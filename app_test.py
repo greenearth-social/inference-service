@@ -4,6 +4,7 @@ import sys
 import types
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -277,3 +278,116 @@ def test_rejects_batched_history_that_violates_fixed_embedding_dim(app_fixed_dim
 def test_rejects_zero_width_embedding_row(app_fixed_dim):
     with pytest.raises(ValueError, match="greater than 0"):
         app_fixed_dim._validate_single_user_history([[]])
+
+
+def test_post_tower_request_accepts_unbatched_and_batched(app_request):
+    app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0], [3.0, 4.0]])
+
+
+def test_post_tower_request_rejects_ragged_batched_vectors(app_request):
+    with pytest.raises(ValueError, match="same length"):
+        app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0], [3.0]])
+
+
+def test_post_tower_request_enforces_embed_dim(app_fixed_dim):
+    app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="expected D=3"):
+        app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0])
+
+
+def test_get_entry_or_404_returns_404_for_unknown_model(app_request, monkeypatch):
+    monkeypatch.setattr(app_request, "_models_initialized", True)
+    monkeypatch.setattr(app_request, "_models_init_error", None)
+    monkeypatch.setattr(app_request, "_models", {})
+
+    with pytest.raises(app_request.HTTPException, match="Unknown model"):
+        app_request._get_entry_or_404("nope")
+
+
+def test_get_entry_or_404_returns_500_when_registry_init_failed(app_request, monkeypatch):
+    monkeypatch.setattr(app_request, "_models_initialized", True)
+    monkeypatch.setattr(app_request, "_models_init_error", "boom")
+    monkeypatch.setattr(app_request, "_models", {})
+
+    with pytest.raises(app_request.HTTPException, match="Model registry init failed"):
+        app_request._get_entry_or_404("user-tower")
+
+
+def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request, monkeypatch):
+    captured = {}
+
+    def fake_pad(*, history_embeddings, max_history_len, embed_dim):
+        captured["pad_args"] = {
+            "history_embeddings": history_embeddings,
+            "max_history_len": max_history_len,
+            "embed_dim": embed_dim,
+        }
+        return [[[1.0, 2.0], [3.0, 4.0]]], [[1, 0]]
+
+    def user_model(history_embeddings, history_mask):
+        captured["model_inputs"] = {
+            "history_embeddings": history_embeddings.value,
+            "history_mask": history_mask.value,
+        }
+        return app_request.torch.Tensor([[42.0]])
+
+    monkeypatch.setattr(app_request, "get_padded_embedding_history_and_mask_batched", fake_pad)
+
+    entry = app_request.LoadedModel(model_type="user-tower", signature="history")
+    entry.module = user_model
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.UserTowerPredictRequest(history_embeddings=[[9.0, 8.0], [7.0, 6.0]])
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["pad_args"]["history_embeddings"] == [[9.0, 8.0], [7.0, 6.0]]
+    assert captured["pad_args"]["max_history_len"] == app_request.GE_INFERENCE_MAX_HISTORY_LEN
+    assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_EMBED_DIM
+    assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0], [3.0, 4.0]]]
+    assert captured["model_inputs"]["history_mask"] == [[1, 0]]
+    assert out.tolist() == [[42.0]]
+
+
+def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request):
+    captured = {}
+
+    def post_model(post_embeddings):
+        captured["post_embeddings"] = post_embeddings.value
+        return app_request.torch.Tensor([[2.0]])
+
+    entry = app_request.LoadedModel(model_type="post-tower", signature="vector")
+    entry.module = post_model
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["post_embeddings"] == [[1.0, 2.0, 3.0]]
+    assert out.tolist() == [[2.0]]
+
+
+def test_predict_with_entry_rejects_request_type_mismatch(app_request):
+    entry = app_request.LoadedModel(model_type="user-tower", signature="history")
+    entry.module = Mock()
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+
+    with pytest.raises(app_request.HTTPException) as exc_info:
+        app_request._predict_with_entry(entry, req)
+
+    assert exc_info.value.status_code == 422
+    assert "expects a user-tower request body" in str(exc_info.value.detail)
+
+
+def test_require_ready_raises_503_when_model_not_loaded(app_request, monkeypatch):
+    entry = app_request.LoadedModel(model_type="user-tower", signature="history")
+    monkeypatch.setattr(app_request, "ensure_models_loaded", lambda: None)
+
+    with pytest.raises(app_request.HTTPException) as exc_info:
+        app_request._require_ready(entry)
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["model_type"] == "user-tower"
+    assert exc_info.value.detail["ready"] is False
