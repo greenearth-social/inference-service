@@ -98,13 +98,13 @@ def _classify_history_embeddings_shape(history_embeddings: Any) -> HistoryEmbedd
     if not isinstance(history_embeddings, list):
         raise ValueError("history_embeddings must be a list")
     if len(history_embeddings) == 0:
-        return "single_empty"
+        return "single_empty" # [] (dim: [0])
     if not isinstance(history_embeddings[0], list):
         raise ValueError("history_embeddings must be a list of lists")
     if len(history_embeddings[0]) == 0:
         if len(history_embeddings) == 1:
-            return "single_empty"
-        return "batched_history"
+            return "single_empty" # [[]] (dim: [1, 0])
+        return "batched_history" # assumes we have a batch and the first entry happens to be empty
     if isinstance(history_embeddings[0][0], list):
         return "batched_history"
     return "single_history"
