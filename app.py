@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Discriminator, Tag, model_validator
 
-from shared.input_data_helpers import get_padded_embedding_history_and_mask_batched
+from shared.input_data_helpers import get_padded_embedding_history_and_mask_batched, classify_history_embeddings_shape
 
 
 @asynccontextmanager
@@ -91,25 +91,6 @@ _models: Dict[str, LoadedModel] = {}
 # -------------------------
 
 
-HistoryEmbeddingsShape = Literal["single_empty", "single_history", "batched_history"]
-
-
-def _classify_history_embeddings_shape(history_embeddings: Any) -> HistoryEmbeddingsShape:
-    if not isinstance(history_embeddings, list):
-        raise ValueError("history_embeddings must be a list")
-    if len(history_embeddings) == 0:
-        return "single_empty" # [] (dim: [0])
-    if not isinstance(history_embeddings[0], list):
-        raise ValueError("history_embeddings must be a list of lists")
-    if len(history_embeddings[0]) == 0:
-        if len(history_embeddings) == 1:
-            return "single_empty" # [[]] (dim: [1, 0])
-        return "batched_history" # assumes we have a batch and the first entry happens to be empty
-    if isinstance(history_embeddings[0][0], list):
-        return "batched_history"
-    return "single_history"
-
-
 def _validate_single_user_history(user_history: list[list[float]]) -> None:
     first_len = len(user_history[0])
     if first_len == 0:
@@ -143,7 +124,7 @@ class UserTowerPredictRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
         he = self.history_embeddings
-        shape = _classify_history_embeddings_shape(he)
+        shape = classify_history_embeddings_shape(he)
 
         match shape:
             case "single_empty":

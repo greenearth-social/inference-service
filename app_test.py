@@ -68,96 +68,6 @@ def _install_stub_modules() -> None:
         torch.jit = types.SimpleNamespace(ScriptModule=type("ScriptModule", (), {}), load=lambda *args, **kwargs: None)
         sys.modules["torch"] = torch
 
-    if "clearml" not in sys.modules:
-        clearml = types.ModuleType("clearml")
-        clearml.Model = type("Model", (), {})
-        sys.modules["clearml"] = clearml
-
-    if "fastapi" not in sys.modules:
-        fastapi = types.ModuleType("fastapi")
-
-        class FastAPI:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def get(self, *args, **kwargs):
-                def decorator(fn):
-                    return fn
-
-                return decorator
-
-            def post(self, *args, **kwargs):
-                def decorator(fn):
-                    return fn
-
-                return decorator
-
-        class HTTPException(Exception):
-            def __init__(self, status_code=None, detail=None):
-                self.status_code = status_code
-                self.detail = detail
-                super().__init__(detail)
-
-        fastapi.FastAPI = FastAPI
-        fastapi.HTTPException = HTTPException
-        fastapi.Security = lambda dependency=None: dependency
-        fastapi.Body = lambda *args, **kwargs: None
-        sys.modules["fastapi"] = fastapi
-
-        responses = types.ModuleType("fastapi.responses")
-        responses.JSONResponse = type("JSONResponse", (), {})
-        sys.modules["fastapi.responses"] = responses
-
-        security = types.ModuleType("fastapi.security")
-
-        class APIKeyHeader:
-            def __init__(self, *args, **kwargs):
-                pass
-
-        security.APIKeyHeader = APIKeyHeader
-        sys.modules["fastapi.security"] = security
-
-    if "pydantic" not in sys.modules:
-        pydantic = types.ModuleType("pydantic")
-
-        def model_validator(*, mode):
-            def decorator(fn):
-                fn.__model_validator_mode__ = mode
-                return fn
-
-            return decorator
-
-        class BaseModel:
-            __after_validators__ = []
-
-            def __init_subclass__(cls, **kwargs):
-                super().__init_subclass__(**kwargs)
-                cls.__after_validators__ = [
-                    name
-                    for name, value in cls.__dict__.items()
-                    if getattr(value, "__model_validator_mode__", None) == "after"
-                ]
-
-            def __init__(self, **kwargs):
-                for key, value in kwargs.items():
-                    setattr(self, key, value)
-                for validator_name in self.__class__.__after_validators__:
-                    getattr(self, validator_name)()
-
-        pydantic.BaseModel = BaseModel
-        pydantic.Discriminator = lambda value: value
-        pydantic.Tag = lambda value: value
-        pydantic.model_validator = model_validator
-        sys.modules["pydantic"] = pydantic
-
-    if "shared" not in sys.modules:
-        shared = types.ModuleType("shared")
-        input_data_helpers = types.ModuleType("shared.input_data_helpers")
-        input_data_helpers.get_padded_embedding_history_and_mask_batched = lambda **kwargs: ([], [])
-        shared.input_data_helpers = input_data_helpers
-        sys.modules["shared"] = shared
-        sys.modules["shared.input_data_helpers"] = input_data_helpers
-
 
 def _load_app_module(module_name: str, *, max_batch: int = 4, embed_dim: int = 0, max_history_len: int = 8):
     _install_stub_modules()
@@ -189,33 +99,33 @@ def app_fixed_dim():
 
 
 def test_classifies_empty_flat_history_as_single_empty(app_shape):
-    assert app_shape._classify_history_embeddings_shape([]) == "single_empty"
+    assert app_shape.classify_history_embeddings_shape([]) == "single_empty"
 
 
 def test_classifies_empty_nested_history_as_single_empty(app_shape):
-    assert app_shape._classify_history_embeddings_shape([[]]) == "single_empty"
+    assert app_shape.classify_history_embeddings_shape([[]]) == "single_empty"
 
 
 def test_classifies_single_history_as_single_history(app_shape):
-    assert app_shape._classify_history_embeddings_shape([[1.0, 2.0], [3.0, 4.0]]) == "single_history"
+    assert app_shape.classify_history_embeddings_shape([[1.0, 2.0], [3.0, 4.0]]) == "single_history"
 
 
 def test_classifies_batch_with_empty_first_user_as_batched_history(app_shape):
-    assert app_shape._classify_history_embeddings_shape([[], [[1.0, 2.0]]]) == "batched_history"
+    assert app_shape.classify_history_embeddings_shape([[], [[1.0, 2.0]]]) == "batched_history"
 
 
 def test_classifies_three_dimensional_input_as_batched_history(app_shape):
-    assert app_shape._classify_history_embeddings_shape([[[1.0, 2.0]], [[3.0, 4.0]]]) == "batched_history"
+    assert app_shape.classify_history_embeddings_shape([[[1.0, 2.0]], [[3.0, 4.0]]]) == "batched_history"
 
 
 def test_rejects_non_list_top_level(app_shape):
     with pytest.raises(ValueError, match="history_embeddings must be a list"):
-        app_shape._classify_history_embeddings_shape("not-a-list")
+        app_shape.classify_history_embeddings_shape("not-a-list")
 
 
 def test_rejects_top_level_list_that_does_not_contain_lists(app_shape):
     with pytest.raises(ValueError, match="history_embeddings must be a list of lists"):
-        app_shape._classify_history_embeddings_shape([1.0, 2.0])
+        app_shape.classify_history_embeddings_shape([1.0, 2.0])
 
 
 def test_accepts_empty_flat_history(app_request):
@@ -250,7 +160,7 @@ def test_rejects_single_history_with_mismatched_embedding_dimensions(app_request
 
 def test_rejects_mixed_rank_batch_entry(app_request):
     with pytest.raises(ValueError, match="list of lists"):
-        app_request.UserTowerPredictRequest(history_embeddings=[[[1.0, 2.0]], [1.0, 2.0]])
+        app_request._validate_batched_user_history([[[1.0, 2.0]], [1.0, 2.0]])
 
 
 def test_rejects_non_list_user_entry_in_batch(app_request):
