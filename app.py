@@ -91,16 +91,30 @@ _models: Dict[str, LoadedModel] = {}
 # -------------------------
 
 
-def _validate_single_user_history(history_embedding: list[list[float]]) -> None:
-    first_len = len(history_embedding[0])
+def _validate_single_user_history(user_history: list[list[float]]) -> None:
+    first_len = len(user_history[0])
     if first_len == 0:
         raise ValueError("embedding dimension must be greater than 0")
     if GE_INFERENCE_EMBED_DIM:
-        if not all(len(history_post) == GE_INFERENCE_EMBED_DIM for history_post in history_embedding):
+        if not all(len(history_post) == GE_INFERENCE_EMBED_DIM for history_post in user_history):
             raise ValueError(f"embedding dim must be {GE_INFERENCE_EMBED_DIM} for all history embeddings")
     else:
-        if not all(len(history_post) == first_len for history_post in history_embedding):
+        if not all(len(history_post) == first_len for history_post in user_history):
             raise ValueError(f"all history embeddings must have the same dimension as one another")
+
+
+def _validate_batched_user_history(history_embeddings: list[list[Any]]) -> None:
+    # have to account for the possibility of empty entries in the batch. which could be [] or [[]]
+    if len(history_embeddings) > GE_INFERENCE_MAX_BATCH:
+        raise ValueError(f"batch too large! (got={len(history_embeddings)}; max={GE_INFERENCE_MAX_BATCH})")
+    for user in history_embeddings:
+        if not isinstance(user, list):
+            raise ValueError("each user's history must be a list")
+        if len(user) == 0 or (len(user) == 1 and isinstance(user[0], list) and len(user[0]) == 0):
+            continue # empty history, which is ok
+        if not isinstance(user[0], list):
+            raise ValueError("each (non-empty) user's history must be a list of lists")
+        _validate_single_user_history(user)
 
 
 class UserTowerPredictRequest(BaseModel):
@@ -116,28 +130,22 @@ class UserTowerPredictRequest(BaseModel):
             return self # [] (dim: [0]) <- treat as a single empty history
         if not isinstance(he[0], list):
             raise ValueError("history_embeddings must be a list of lists")
-        if len(he) == 1 and len(he[0]) == 0: 
-            return self # [[]] (dim: [1, 0]) <- treat as a single empty history
         
-        # Handle the non (fully) empty cases:
-        if isinstance(he[0][0], float):
+        if len(he[0]) == 0: 
+            if len(he) == 1:
+                return self # [[]] (dim: [1, 0]) <- treat as a single empty history
+            else:
+                # assume batching, a list of list of lists
+                _validate_batched_user_history(he)
+                return self # [[float, float, ...], [float, float, ...], ...] (dim: [B, T, D]) <- a batch of histories, a list of list of list of floats
+        elif isinstance(he[0][0], list):
+            # assume batching, a list of list of lists
+            _validate_batched_user_history(he)
+            return self # [[float, float, ...], [float, float, ...], ...] (dim: [B, T, D]) <- a batch of histories, a list of list of list of floats
+        else:
             # assume no batching, a single history, a list of list of floats
             _validate_single_user_history(he)
             return self # [[float, float, ...]] (dim: [T, D]) <- a single history, a list of list of floats
-        else:
-            # assume batching, a list of list of lists
-            # but have to account for the possibility of empty entries in the batch. which could be [] or [[]]
-            if len(he) > GE_INFERENCE_MAX_BATCH:
-                raise ValueError(f"batch too large! got={len(he)}; max={GE_INFERENCE_MAX_BATCH})")
-            for user in he:
-                if not isinstance(user, list):
-                    raise ValueError("each user's history must be a list")
-                if len(user) == 0 or (len(user) == 1 and isinstance(user[0], list) and len(user[0]) == 0):
-                    continue # empty history, which is ok
-                if not isinstance(user[0], list):
-                    raise ValueError("each (non-empty) user's history must be a list of lists")
-                _validate_single_user_history(user)
-            return self
 
 
 class PostTowerPredictRequest(BaseModel):
