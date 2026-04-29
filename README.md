@@ -107,6 +107,24 @@ pipenv run uvicorn app:app --reload
 
 The API will be available at `http://localhost:8000`.
 
+### Running with Docker
+
+If you want to run the service in Docker from the repo root, first create an
+`.env` file with the variables the service needs. A common starting point is:
+
+```bash
+cp .env.example .env
+```
+
+Then build and run the container:
+
+```bash
+docker build -t ge-inference-service .
+docker run --rm -p 8080:8080 --env-file .env ge-inference-service
+```
+
+The API will be available at `http://localhost:8080`.
+
 ## API Endpoints
 
 - `GET /health`: unauthenticated process health check
