@@ -47,6 +47,7 @@ log_build() {
     echo -e "${BLUE}[BUILD]${NC} $1"
 }
 
+<<<<<<< HEAD
 get_domain_mapping_condition_status() {
     local domain="$1"
     local condition_type="$2"
@@ -91,6 +92,26 @@ resolve_inference_domain() {
     echo "$(default_inference_domain)"
 }
 
+=======
+generate_requirements() {
+    log_info "Generating requirements.txt from Pipfile..."
+
+    if ! command -v pipenv &> /dev/null; then
+        log_error "pipenv is not installed. Please install it first: pip install pipenv"
+        exit 1
+    fi
+
+    pipenv requirements > requirements.txt
+
+    if [ $? -eq 0 ]; then
+        log_info "Generated requirements.txt successfully"
+    else
+        log_error "Failed to generate requirements.txt"
+        exit 1
+    fi
+}
+
+>>>>>>> ba97662 (python 3.11 in Pipfile to match docker image. adding generation of requirements.txt in deploy.sh)
 validate_config() {
     log_info "Validating configuration..."
 
@@ -277,6 +298,7 @@ main() {
     log_info "Max history len: $GE_INFERENCE_MAX_HISTORY_LEN"
 
     validate_config
+    generate_requirements
     verify_vpc_connector
     deploy_inference_service
     reconcile_domain_mapping

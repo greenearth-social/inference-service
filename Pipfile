@@ -15,4 +15,4 @@ shared = {git = "https://github.com/greenearth-social/engagement-prediction.git"
 pytest = "*"
 
 [requires]
-python_version = "3.13"
+python_version = "3.11"
