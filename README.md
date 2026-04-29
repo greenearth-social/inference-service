@@ -105,7 +105,16 @@ Then start the server:
 pipenv run uvicorn app:app --reload
 ```
 
-The API will be available at `http://localhost:8000`.
+The inference service API will be available at `http://localhost:8000`.
+
+When you want the Green Earth API to call your local inference instance, override the Green Earth API deployment with:
+
+```bash
+GE_INFERENCE_BASE_URL="http://127.0.0.1:8000" ./scripts/deploy.sh --environment stage
+```
+
+That explicit base URL override takes precedence over mapped domains.
+
 
 ### Running with Docker
 
@@ -315,13 +324,3 @@ Runtime configuration used by the app:
 - `GE_INFERENCE_WARMUP`: whether to run warmup on startup
 - `GE_INFERENCE_EMBED_DIM`: optional embedding dimension check
 - `GE_INFERENCE_MODEL_CACHE_DIR`: local cache dir for downloaded `gs://` models
-
-## Local Development
-
-When you want API to call a local inference instance, override API deployment with:
-
-```bash
-GE_INFERENCE_BASE_URL="http://127.0.0.1:8001" ./scripts/deploy.sh --environment stage
-```
-
-That explicit base URL override takes precedence over mapped domains.
