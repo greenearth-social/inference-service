@@ -47,7 +47,6 @@ log_build() {
     echo -e "${BLUE}[BUILD]${NC} $1"
 }
 
-<<<<<<< HEAD
 get_domain_mapping_condition_status() {
     local domain="$1"
     local condition_type="$2"
@@ -92,7 +91,6 @@ resolve_inference_domain() {
     echo "$(default_inference_domain)"
 }
 
-=======
 generate_requirements() {
     log_info "Generating requirements.txt from Pipfile..."
 
@@ -111,7 +109,6 @@ generate_requirements() {
     fi
 }
 
->>>>>>> ba97662 (python 3.11 in Pipfile to match docker image. adding generation of requirements.txt in deploy.sh)
 validate_config() {
     log_info "Validating configuration..."
 
