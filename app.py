@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -42,16 +43,21 @@ logger = logging.getLogger(__name__)
 # -------------------------
 # Config
 # -------------------------
-GE_INFERENCE_MAX_BATCH = int(os.getenv("GE_INFERENCE_MAX_BATCH", "1024"))
 GE_INFERENCE_PREFER_CUDA = os.getenv("GE_INFERENCE_PREFER_CUDA", "1") == "1"
 GE_INFERENCE_WARMUP = os.getenv("GE_INFERENCE_WARMUP", "1") == "1"
 _API_KEY: str | None = os.environ.get("GE_INFERENCE_API_KEY") or None
 
-# If you know these shapes, set them to validate and to create dummy warmup.
-GE_INFERENCE_EMBED_DIM = int(os.getenv("GE_INFERENCE_EMBED_DIM", "0")) # 0 means unknown/skip dim validation
+GE_INFERENCE_EMBED_DIM = int(os.getenv("GE_INFERENCE_EMBED_DIM", "0"))
+if GE_INFERENCE_EMBED_DIM <= 0:
+    raise ValueError("Must supply a valid (positive) GE_INFERENCE_EMBED_DIM!")
+
 GE_INFERENCE_MAX_HISTORY_LEN = int(os.getenv("GE_INFERENCE_MAX_HISTORY_LEN", "0")) 
 if GE_INFERENCE_MAX_HISTORY_LEN <= 0:
-    raise ValueError("Must supply a valid GE_INFERENCE_MAX_HISTORY_LEN!")
+    raise ValueError("Must supply a valid (positive) GE_INFERENCE_MAX_HISTORY_LEN!")
+
+GE_INFERENCE_MAX_BATCH: int | None = int(os.getenv("GE_INFERENCE_MAX_BATCH", "0"))
+if GE_INFERENCE_MAX_BATCH == 0:
+    GE_INFERENCE_MAX_BATCH = None
 
 DTYPE = torch.float32
 
@@ -105,7 +111,7 @@ def _validate_single_user_history(user_history: list[list[float]]) -> None:
 
 def _validate_batched_user_history(history_embeddings: list[list[Any]]) -> None:
     # have to account for the possibility of empty entries in the batch. which could be [] or [[]]
-    if len(history_embeddings) > GE_INFERENCE_MAX_BATCH:
+    if GE_INFERENCE_MAX_BATCH and len(history_embeddings) > GE_INFERENCE_MAX_BATCH:
         raise ValueError(f"batch too large! (got={len(history_embeddings)}; max={GE_INFERENCE_MAX_BATCH})")
     for user in history_embeddings:
         if not isinstance(user, list):
@@ -152,7 +158,7 @@ class PostTowerPredictRequest(BaseModel):
         is_batched = isinstance(pe[0], list)
         if is_batched:
             batch = pe  # type: ignore[assignment]
-            if len(batch) > GE_INFERENCE_MAX_BATCH:
+            if GE_INFERENCE_MAX_BATCH and len(batch) > GE_INFERENCE_MAX_BATCH:
                 raise ValueError(f"batch too large (max={GE_INFERENCE_MAX_BATCH})")
             d0 = len(batch[0]) if len(batch) > 0 else 0 # type: ignore
             if d0 == 0:
@@ -295,6 +301,12 @@ def _to_python(obj: Any) -> Any:
             out[k] = _to_python(v)
         return out
     return obj
+
+
+def _format_timestamp(ts: Optional[float]) -> Optional[str]:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 def _warmup_entry(entry: LoadedModel) -> None:
@@ -570,8 +582,8 @@ def ready():
                 "model_path": entry.resolved_model_path,
                 "model_id": entry.resolved_model_id,
                 "load_error": entry.load_error,
-                "load_started_at": entry.load_started_at,
-                "load_finished_at": entry.load_finished_at,
+                "load_started_at": _format_timestamp(entry.load_started_at),
+                "load_finished_at": _format_timestamp(entry.load_finished_at),
             }
         )
 
@@ -601,8 +613,8 @@ def list_models() -> dict:
                 "model_path": entry.resolved_model_path,
                 "model_id": entry.resolved_model_id,
                 "load_error": entry.load_error,
-                "load_started_at": entry.load_started_at,
-                "load_finished_at": entry.load_finished_at,
+                "load_started_at": _format_timestamp(entry.load_started_at),
+                "load_finished_at": _format_timestamp(entry.load_finished_at),
             }
         )
     return {"models": models_payload, "registry_error": _models_init_error}

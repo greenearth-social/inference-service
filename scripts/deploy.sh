@@ -22,7 +22,9 @@ GE_INFERENCE_USER_TOWER_MODEL_URI="${GE_INFERENCE_USER_TOWER_MODEL_URI:-}"
 GE_INFERENCE_POST_TOWER_MODEL_URI="${GE_INFERENCE_POST_TOWER_MODEL_URI:-}"
 GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID="${GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID:-}"
 GE_INFERENCE_POST_TOWER_CLEARML_MODEL_ID="${GE_INFERENCE_POST_TOWER_CLEARML_MODEL_ID:-}"
-GE_INFERENCE_MAX_HISTORY_LEN="${GE_INFERENCE_MAX_HISTORY_LEN:-}"
+GE_INFERENCE_MAX_HISTORY_LEN="${GE_INFERENCE_MAX_HISTORY_LEN:-128}"
+GE_INFERENCE_EMBED_DIM="${GE_INFERENCE_EMBED_DIM:-384}"
+GE_INFERENCE_MAX_BATCH="${GE_INFERENCE_MAX_BATCH:-0}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -120,7 +122,19 @@ validate_config() {
 
     if [ -z "$GE_INFERENCE_MAX_HISTORY_LEN" ] || ! [[ "$GE_INFERENCE_MAX_HISTORY_LEN" =~ ^[1-9][0-9]*$ ]]; then
         log_error "GE_INFERENCE_MAX_HISTORY_LEN is required and must be a positive integer."
-        log_error "Example: GE_INFERENCE_MAX_HISTORY_LEN=50 ./deploy.sh"
+        log_error "Example: GE_INFERENCE_MAX_HISTORY_LEN=128 ./deploy.sh"
+        exit 1
+    fi
+
+    if [ -z "$GE_INFERENCE_EMBED_DIM" ] || ! [[ "$GE_INFERENCE_EMBED_DIM" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "GE_INFERENCE_EMBED_DIM is required and must be a positive integer."
+        log_error "Example: GE_INFERENCE_EMBED_DIM=384 ./deploy.sh"
+        exit 1
+    fi
+
+    if [ -z "$GE_INFERENCE_MAX_BATCH" ] || ! [[ "$GE_INFERENCE_MAX_BATCH" =~ ^[0-9]+$ ]]; then
+        log_error "GE_INFERENCE_MAX_BATCH must be a non-negative integer."
+        log_error "Example: GE_INFERENCE_MAX_BATCH=0 ./deploy.sh"
         exit 1
     fi
 
@@ -242,6 +256,8 @@ deploy_inference_service() {
     cat > "$temp_var_dir/env-vars.yaml" <<EOF
 GE_INFERENCE_MODELS: "$GE_INFERENCE_MODELS"
 GE_INFERENCE_MAX_HISTORY_LEN: "$GE_INFERENCE_MAX_HISTORY_LEN"
+GE_INFERENCE_EMBED_DIM: "$GE_INFERENCE_EMBED_DIM"
+GE_INFERENCE_MAX_BATCH: "$GE_INFERENCE_MAX_BATCH"
 GE_INFERENCE_PREFER_CUDA: "0"
 GE_INFERENCE_WARMUP: "0"
 EOF
@@ -293,6 +309,8 @@ main() {
     log_info "Environment:     $GE_ENVIRONMENT"
     log_info "Models:          $GE_INFERENCE_MODELS"
     log_info "Max history len: $GE_INFERENCE_MAX_HISTORY_LEN"
+    log_info "Embed dimension: $GE_INFERENCE_EMBED_DIM"
+    log_info "Max batch:       $GE_INFERENCE_MAX_BATCH"
 
     validate_config
     generate_requirements
@@ -334,6 +352,14 @@ while [[ $# -gt 0 ]]; do
             GE_INFERENCE_MAX_HISTORY_LEN="$2"
             shift 2
             ;;
+        --embed-dim)
+            GE_INFERENCE_EMBED_DIM="$2"
+            shift 2
+            ;;
+        --max-batch)
+            GE_INFERENCE_MAX_BATCH="$2"
+            shift 2
+            ;;
         --inference-domain)
             GE_INFERENCE_DOMAIN="$2"
             shift 2
@@ -364,6 +390,8 @@ while [[ $# -gt 0 ]]; do
             echo "  GE_ENVIRONMENT           Same as --environment"
             echo "  GE_INFERENCE_MODELS                      Same as --models (required)"
             echo "  GE_INFERENCE_MAX_HISTORY_LEN             Same as --max-history-len (required)"
+            echo "  GE_INFERENCE_EMBED_DIM                   Same as --embed-dim (required)"
+            echo "  GE_INFERENCE_MAX_BATCH                   Same as --max-batch (optional; default is 0 which means no limit)"
             echo "  GE_INFERENCE_USER_TOWER_MODEL_URI        GCS URI for user-tower model"
             echo "  GE_INFERENCE_POST_TOWER_MODEL_URI        GCS URI for post-tower model"
             echo "  GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID ClearML model ID for user-tower"
