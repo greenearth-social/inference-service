@@ -27,7 +27,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(title="Green Earth Inference Service", lifespan=lifespan)
 
 
 def _require_api_key(api_key: str = Security(_api_key_header)) -> None:
