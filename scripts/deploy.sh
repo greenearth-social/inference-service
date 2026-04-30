@@ -132,9 +132,9 @@ validate_config() {
         exit 1
     fi
 
-    if [ -z "$GE_INFERENCE_MAX_BATCH" ] || ! [[ "$GE_INFERENCE_MAX_BATCH" =~ ^[1-9][0-9]*$ ]]; then
-        log_error "GE_INFERENCE_MAX_BATCH must be a positive integer."
-        log_error "Example: GE_INFERENCE_MAX_BATCH=1024 ./deploy.sh"
+    if [ -z "$GE_INFERENCE_MAX_BATCH" ] || ! [[ "$GE_INFERENCE_MAX_BATCH" =~ ^[0-9]+$ ]]; then
+        log_error "GE_INFERENCE_MAX_BATCH must be a non-negative integer."
+        log_error "Example: GE_INFERENCE_MAX_BATCH=0 ./deploy.sh"
         exit 1
     fi
 
