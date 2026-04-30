@@ -91,6 +91,24 @@ resolve_inference_domain() {
     echo "$(default_inference_domain)"
 }
 
+generate_requirements() {
+    log_info "Generating requirements.txt from Pipfile..."
+
+    if ! command -v pipenv &> /dev/null; then
+        log_error "pipenv is not installed. Please install it first: pip install pipenv"
+        exit 1
+    fi
+
+    pipenv requirements > requirements.txt
+
+    if [ $? -eq 0 ]; then
+        log_info "Generated requirements.txt successfully"
+    else
+        log_error "Failed to generate requirements.txt"
+        exit 1
+    fi
+}
+
 validate_config() {
     log_info "Validating configuration..."
 
@@ -277,6 +295,7 @@ main() {
     log_info "Max history len: $GE_INFERENCE_MAX_HISTORY_LEN"
 
     validate_config
+    generate_requirements
     verify_vpc_connector
     deploy_inference_service
     reconcile_domain_mapping

@@ -18,7 +18,7 @@ WORKDIR /app
 
 # OS deps (keep small; Cloud Run-friendly)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl \
+      ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as non-root (Cloud Run-friendly).
