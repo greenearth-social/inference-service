@@ -306,7 +306,7 @@ def _to_python(obj: Any) -> Any:
 def _format_timestamp(ts: Optional[float]) -> Optional[str]:
     if ts is None:
         return None
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
 
 
 def _warmup_entry(entry: LoadedModel) -> None:
