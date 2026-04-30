@@ -69,7 +69,7 @@ def _install_stub_modules() -> None:
         sys.modules["torch"] = torch
 
 
-def _load_app_module(module_name: str, *, max_batch: int = 4, embed_dim: int = 0, max_history_len: int = 8):
+def _load_app_module(module_name: str, *, max_batch: int = 4, embed_dim: int = 3, max_history_len: int = 8):
     _install_stub_modules()
 
     os.environ["GE_INFERENCE_MAX_BATCH"] = str(max_batch)
@@ -90,7 +90,7 @@ def app_shape():
 
 @pytest.fixture(scope="module")
 def app_request():
-    return _load_app_module("inference_service_app_request_tests", max_batch=3, embed_dim=0)
+    return _load_app_module("inference_service_app_request_tests", max_batch=3, embed_dim=3)
 
 
 @pytest.fixture(scope="module")
@@ -137,12 +137,12 @@ def test_accepts_empty_nested_history(app_request):
 
 
 def test_accepts_single_history(app_request):
-    app_request.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0], [3.0, 4.0]])
+    app_request.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
 
 
 def test_accepts_batched_histories_with_empty_entries(app_request):
     app_request.UserTowerPredictRequest(
-        history_embeddings=[[], [[1.0, 2.0], [3.0, 4.0]], [[]]]
+        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]]
     )
 
 
@@ -154,18 +154,18 @@ def test_rejects_batched_history_over_max_batch(app_request):
 
 
 def test_rejects_single_history_with_mismatched_embedding_dimensions(app_request):
-    with pytest.raises(ValueError, match="same dimension"):
+    with pytest.raises(ValueError, match="embedding dim must be 3"):
         app_request.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0], [3.0]])
 
 
 def test_rejects_mixed_rank_batch_entry(app_request):
     with pytest.raises(ValueError, match="list of lists"):
-        app_request._validate_batched_user_history([[[1.0, 2.0]], [1.0, 2.0]])
+        app_request._validate_batched_user_history([[[1.0, 2.0, 3.0]], [1.0, 2.0]])
 
 
 def test_rejects_non_list_user_entry_in_batch(app_request):
     with pytest.raises(ValueError, match="each user's history must be a list"):
-        app_request._validate_batched_user_history([[[1.0, 2.0]], "bad-user"])
+        app_request._validate_batched_user_history([[[1.0, 2.0, 3.0]], "bad-user"])
 
 
 def test_accepts_histories_matching_fixed_embedding_dim(app_fixed_dim):
@@ -192,7 +192,7 @@ def test_rejects_zero_width_embedding_row(app_fixed_dim):
 
 def test_post_tower_request_accepts_unbatched_and_batched(app_request):
     app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
-    app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0], [3.0, 4.0]])
+    app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
 
 
 def test_post_tower_request_rejects_ragged_batched_vectors(app_request):
@@ -233,7 +233,7 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
             "max_history_len": max_history_len,
             "embed_dim": embed_dim,
         }
-        return [[[1.0, 2.0], [3.0, 4.0]]], [[1, 0]]
+        return [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], [[1, 0]]
 
     def user_model(history_embeddings, history_mask):
         captured["model_inputs"] = {
@@ -248,13 +248,13 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     entry.module = user_model
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.UserTowerPredictRequest(history_embeddings=[[9.0, 8.0], [7.0, 6.0]])
+    req = app_request.UserTowerPredictRequest(history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]])
     out = app_request._predict_with_entry(entry, req)
 
-    assert captured["pad_args"]["history_embeddings"] == [[9.0, 8.0], [7.0, 6.0]]
+    assert captured["pad_args"]["history_embeddings"] == [[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]]
     assert captured["pad_args"]["max_history_len"] == app_request.GE_INFERENCE_MAX_HISTORY_LEN
     assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_EMBED_DIM
-    assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0], [3.0, 4.0]]]
+    assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
     assert captured["model_inputs"]["history_mask"] == [[1, 0]]
     assert out.tolist() == [[42.0]]
 
