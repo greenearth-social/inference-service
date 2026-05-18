@@ -15,6 +15,8 @@ GE_GCP_REGION="${GE_GCP_REGION:-us-east1}"
 GE_ENVIRONMENT="${GE_ENVIRONMENT:-stage}"
 GE_ENABLE_INFERENCE_DOMAIN_MAPPING="${GE_ENABLE_INFERENCE_DOMAIN_MAPPING:-true}"
 GE_INFERENCE_DOMAIN="${GE_INFERENCE_DOMAIN:-}"
+GE_INFERENCE_MIN_INSTANCES="${GE_INFERENCE_MIN_INSTANCES:-1}"
+GE_INFERENCE_MAX_INSTANCES="${GE_INFERENCE_MAX_INSTANCES:-1}"
 
 # Multi-model config — required, no defaults
 GE_INFERENCE_MODELS="${GE_INFERENCE_MODELS:-}"
@@ -289,8 +291,8 @@ EOF
     deploy_cmd="$deploy_cmd --cpu=2"
     deploy_cmd="$deploy_cmd --memory=2Gi"
     deploy_cmd="$deploy_cmd --timeout=120"
-    deploy_cmd="$deploy_cmd --min-instances=0"
-    deploy_cmd="$deploy_cmd --max-instances=1"
+    deploy_cmd="$deploy_cmd --min-instances=$GE_INFERENCE_MIN_INSTANCES"
+    deploy_cmd="$deploy_cmd --max-instances=$GE_INFERENCE_MAX_INSTANCES"
 
     log_build "Executing: $deploy_cmd"
     eval "$deploy_cmd"
@@ -367,6 +369,14 @@ while [[ $# -gt 0 ]]; do
         --disable-domain-mapping)
             GE_ENABLE_INFERENCE_DOMAIN_MAPPING="false"
             shift
+            ;;
+        --min-instances)
+            GE_INFERENCE_MIN_INSTANCES="$2"
+            shift 2
+            ;;
+        --max-instances)
+            GE_INFERENCE_MAX_INSTANCES="$2"
+            shift 2
             ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
