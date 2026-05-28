@@ -11,6 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[0]
 APP_PATH = REPO_ROOT / "app.py"
+DEFAULT_AUTHOR_IDX_MAP_URI = "gs://test-bucket/author_idx.parquet"
 
 
 def _install_stub_modules() -> None:
@@ -75,7 +76,7 @@ def _load_app_module(
     max_batch: int = 4,
     embed_dim: int = 3,
     max_history_len: int = 8,
-    author_idx_map_uri: str | None = None,
+    author_idx_map_uri: str | None = DEFAULT_AUTHOR_IDX_MAP_URI,
 ):
     _install_stub_modules()
 
@@ -169,6 +170,11 @@ def test_rejects_non_list_top_level(app_shape):
 def test_rejects_top_level_list_that_does_not_contain_lists(app_shape):
     with pytest.raises(ValueError, match="history_embeddings must be a list of lists"):
         app_shape.classify_history_embeddings_shape([1.0, 2.0])
+
+
+def test_requires_author_idx_map_uri():
+    with pytest.raises(ValueError, match="GE_INFERENCE_AUTHOR_IDX_MAP_URI"):
+        _load_app_module("inference_service_app_missing_author_map_tests", author_idx_map_uri=None)
 
 
 def test_accepts_empty_flat_history(app_request):
