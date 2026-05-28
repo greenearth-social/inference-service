@@ -129,33 +129,65 @@ def test_rejects_top_level_list_that_does_not_contain_lists(app_shape):
 
 
 def test_accepts_empty_flat_history(app_request):
-    app_request.UserTowerPredictRequest(history_embeddings=[])
+    app_request.UserTowerPredictRequest(history_embeddings=[], history_target_indices=[])
 
 
 def test_accepts_empty_nested_history(app_request):
-    app_request.UserTowerPredictRequest(history_embeddings=[[]])
+    app_request.UserTowerPredictRequest(history_embeddings=[[]], history_target_indices=[])
 
 
 def test_accepts_single_history(app_request):
-    app_request.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        history_target_indices=["author-1", "author-2"],
+    )
 
 
 def test_accepts_batched_histories_with_empty_entries(app_request):
     app_request.UserTowerPredictRequest(
-        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]]
+        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
+        history_target_indices=[[], ["author-1", "author-2"], []],
     )
+
+
+def test_rejects_single_history_target_indices_length_mismatch(app_request):
+    with pytest.raises(ValueError, match="must match history length"):
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            history_target_indices=["author-1"],
+        )
+
+
+def test_rejects_batched_history_target_indices_shape_mismatch(app_request):
+    with pytest.raises(ValueError, match="must be a list of list of strings"):
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
+            history_target_indices=["author-1", "author-2"],
+        )
+
+
+def test_rejects_batched_history_target_indices_length_mismatch(app_request):
+    with pytest.raises(ValueError, match="must match that user's history length"):
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
+            history_target_indices=[[], ["author-1"], []],
+        )
 
 
 def test_rejects_batched_history_over_max_batch(app_request):
     with pytest.raises(ValueError, match="batch too large"):
         app_request.UserTowerPredictRequest(
-            history_embeddings=[[[1.0]], [[2.0]], [[3.0]], [[4.0]]]
+            history_embeddings=[[[1.0]], [[2.0]], [[3.0]], [[4.0]]],
+            history_target_indices=[["author-1"], ["author-2"], ["author-3"], ["author-4"]],
         )
 
 
 def test_rejects_single_history_with_mismatched_embedding_dimensions(app_request):
     with pytest.raises(ValueError, match="embedding dim must be 3"):
-        app_request.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0], [3.0]])
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[1.0, 2.0], [3.0]],
+            history_target_indices=["author-1", "author-2"],
+        )
 
 
 def test_rejects_mixed_rank_batch_entry(app_request):
@@ -169,19 +201,29 @@ def test_rejects_non_list_user_entry_in_batch(app_request):
 
 
 def test_accepts_histories_matching_fixed_embedding_dim(app_fixed_dim):
-    app_fixed_dim.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0, 3.0]])
-    app_fixed_dim.UserTowerPredictRequest(history_embeddings=[[[1.0, 2.0, 3.0]], []])
+    app_fixed_dim.UserTowerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0]],
+        history_target_indices=["author-1"],
+    )
+    app_fixed_dim.UserTowerPredictRequest(
+        history_embeddings=[[[1.0, 2.0, 3.0]], []],
+        history_target_indices=[["author-1"], []],
+    )
 
 
 def test_rejects_single_history_that_violates_fixed_embedding_dim(app_fixed_dim):
     with pytest.raises(ValueError, match="embedding dim must be 3"):
-        app_fixed_dim.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0]])
+        app_fixed_dim.UserTowerPredictRequest(
+            history_embeddings=[[1.0, 2.0]],
+            history_target_indices=["author-1"],
+        )
 
 
 def test_rejects_batched_history_that_violates_fixed_embedding_dim(app_fixed_dim):
     with pytest.raises(ValueError, match="embedding dim must be 3"):
         app_fixed_dim.UserTowerPredictRequest(
-            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0]]]
+            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0]]],
+            history_target_indices=[["author-1"], ["author-2"]],
         )
 
 
@@ -191,19 +233,38 @@ def test_rejects_zero_width_embedding_row(app_fixed_dim):
 
 
 def test_post_tower_request_accepts_unbatched_and_batched(app_request):
-    app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
-    app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_indices="author-1")
+    app_request.PostTowerPredictRequest(
+        post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        target_author_indices=["author-1", "author-2"],
+    )
 
 
 def test_post_tower_request_rejects_ragged_batched_vectors(app_request):
     with pytest.raises(ValueError, match="same length"):
-        app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0], [3.0]])
+        app_request.PostTowerPredictRequest(
+            post_embeddings=[[1.0, 2.0], [3.0]],
+            target_author_indices=["author-1", "author-2"],
+        )
+
+
+def test_post_tower_request_rejects_author_index_shape_mismatch(app_request):
+    with pytest.raises(ValueError, match="same length as the batch"):
+        app_request.PostTowerPredictRequest(
+            post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            target_author_indices=["author-1"],
+        )
+    with pytest.raises(ValueError, match="single string"):
+        app_request.PostTowerPredictRequest(
+            post_embeddings=[1.0, 2.0, 3.0],
+            target_author_indices=["author-1"],
+        )
 
 
 def test_post_tower_request_enforces_embed_dim(app_fixed_dim):
-    app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_indices="author-1")
     with pytest.raises(ValueError, match="expected D=3"):
-        app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0])
+        app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0], target_author_indices="author-1")
 
 
 def test_get_entry_or_404_returns_404_for_unknown_model(app_request, monkeypatch):
@@ -248,7 +309,10 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     entry.module = user_model
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.UserTowerPredictRequest(history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]])
+    req = app_request.UserTowerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+        history_target_indices=["author-1", "author-2"],
+    )
     out = app_request._predict_with_entry(entry, req)
 
     assert captured["pad_args"]["history_embeddings"] == [[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]]
@@ -270,7 +334,7 @@ def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request):
     entry.module = post_model
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_indices="author-1")
     out = app_request._predict_with_entry(entry, req)
 
     assert captured["post_embeddings"] == [[1.0, 2.0, 3.0]]
@@ -282,7 +346,7 @@ def test_predict_with_entry_rejects_request_type_mismatch(app_request):
     entry.module = Mock()
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_indices="author-1")
 
     with pytest.raises(app_request.HTTPException) as exc_info:
         app_request._predict_with_entry(entry, req)

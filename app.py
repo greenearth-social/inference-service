@@ -97,7 +97,7 @@ _models: dict[str, LoadedModel] = {}
 # -------------------------
 
 
-def _validate_single_user_history(user_history: list[list[float]]) -> None:
+def _validate_single_user_history(user_history: list[list[float]]) -> int:
     first_len = len(user_history[0])
     if first_len == 0:
         raise ValueError("embedding dimension must be greater than 0")
@@ -107,39 +107,60 @@ def _validate_single_user_history(user_history: list[list[float]]) -> None:
     else:
         if not all(len(history_post) == first_len for history_post in user_history):
             raise ValueError(f"all history embeddings must have the same dimension as one another")
+    return len(user_history)
 
 
-def _validate_batched_user_history(history_embeddings: list[list[Any]]) -> None:
+def _validate_batched_user_history(history_embeddings: list[list[Any]]) -> list[int]:
     # have to account for the possibility of empty entries in the batch. which could be [] or [[]]
+    hist_len_list = []
     if GE_INFERENCE_MAX_BATCH and len(history_embeddings) > GE_INFERENCE_MAX_BATCH:
         raise ValueError(f"batch too large! (got={len(history_embeddings)}; max={GE_INFERENCE_MAX_BATCH})")
     for user in history_embeddings:
         if not isinstance(user, list):
             raise ValueError("each user's history must be a list")
         if len(user) == 0 or (len(user) == 1 and isinstance(user[0], list) and len(user[0]) == 0):
+            hist_len_list.append(0)
             continue # empty history, which is ok
         if not isinstance(user[0], list):
             raise ValueError("each (non-empty) user's history must be a list of lists")
-        _validate_single_user_history(user)
+        hist_len = _validate_single_user_history(user)
+        hist_len_list.append(hist_len)
+    return hist_len_list
 
 
 class UserTowerPredictRequest(BaseModel):
     # history_embeddings: [T, D] or [B, T, D]
     history_embeddings: list[list[float]] | list[list[list[float]]]
+    history_target_indices: list[str] | list[list[str]]
 
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
         he = self.history_embeddings
         shape = classify_history_embeddings_shape(he)
+        hti = self.history_target_indices
+        if not isinstance(hti, list):
+            raise ValueError("'history_target_indices' must be a list (of strings or list of list of strings)")
 
         match shape:
             case "single_empty":
+                if len(hti) != 0:
+                    raise ValueError("when 'history_embeddings' is empty, 'history_target_indices' must also be empty")
                 return self
             case "single_history":
-                _validate_single_user_history(he)
+                if len(hti) == 0 or isinstance(hti[0], list):
+                    raise ValueError("when 'history_embeddings' is a single history, 'history_target_indices' must be a list of strings, not a list of list of strings")
+                hist_len = _validate_single_user_history(he)
+                if len(hti) != hist_len:
+                    raise ValueError(f"length of 'history_target_indices' must match history length ({hist_len}) when 'history_embeddings' is a single history")
                 return self
             case "batched_history":
-                _validate_batched_user_history(he)
+                if len(hti) == 0 or isinstance(hti[0], str):
+                    raise ValueError("when 'history_embeddings' is batched, 'history_target_indices' must be a list of list of strings, not a list of strings")
+                hist_len_list = _validate_batched_user_history(he)
+                if len(hti) != len(hist_len_list):
+                    raise ValueError(f"length of 'history_target_indices' must match batch size ({len(hist_len_list)}) when 'history_embeddings' is batched")
+                if not all(len(user_hti) == hist_len for user_hti, hist_len in zip(hti, hist_len_list)):
+                    raise ValueError(f"length of each user's 'history_target_indices' must match that user's history length when 'history_embeddings' is batched")
                 return self
             case _:
                 assert_never(shape)
@@ -148,12 +169,15 @@ class UserTowerPredictRequest(BaseModel):
 class PostTowerPredictRequest(BaseModel):
     # post_embeddings: [D] or [B, D]
     post_embeddings: list[float] | list[list[float]]
+    target_author_indices: str | list[str]
 
     @model_validator(mode="after")
-    def _validate_post_embeddings(self) -> "PostTowerPredictRequest":
+    def _validate_post_inputs(self) -> "PostTowerPredictRequest":
         pe = self.post_embeddings
         if not isinstance(pe, list) or len(pe) == 0:
             raise ValueError("'post_embeddings' must be a non-empty list")
+
+        author_indices = self.target_author_indices
 
         is_batched = isinstance(pe[0], list)
         if is_batched:
@@ -167,12 +191,16 @@ class PostTowerPredictRequest(BaseModel):
                 raise ValueError("all post_embeddings vectors must have the same length")
             if GE_INFERENCE_EMBED_DIM and d0 != GE_INFERENCE_EMBED_DIM:
                 raise ValueError(f"expected D={GE_INFERENCE_EMBED_DIM}, got D={d0}")
+            if not isinstance(author_indices, list) or len(author_indices) != len(batch):
+                raise ValueError("when post_embeddings is batched, target_author_indices must be a list of the same length as the batch")
         else:
             vec = pe  # type: ignore[assignment]
             if len(vec) == 0:
                 raise ValueError("'post_embeddings' must be non-empty")
             if GE_INFERENCE_EMBED_DIM and len(vec) != GE_INFERENCE_EMBED_DIM:
                 raise ValueError(f"expected D={GE_INFERENCE_EMBED_DIM}, got D={len(vec)}")
+            if not isinstance(author_indices, str):
+                raise ValueError("target_author_indices must be a single string when post_embeddings is not batched")
         return self
 
 
