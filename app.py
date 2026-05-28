@@ -67,17 +67,18 @@ if GE_INFERENCE_AUTHOR_IDX_MAP_URI is None:
 
 DTYPE = torch.float32
 
+AUTHOR_PAD_IDX = 0
+AUTHOR_UNK_IDX = 1
+
 # -------------------------
 # State
 # -------------------------
 ModelType = Literal["user-tower", "post-tower"]
-ModelSignature = Literal["vector", "history"]
 
 
 @dataclass
 class LoadedModel:
     model_type: ModelType
-    signature: ModelSignature
     configured_model_path: str | None = None
     configured_model_uri: str | None = None
     configured_clearml_model_id: str | None = None
@@ -143,36 +144,36 @@ def _validate_batched_user_history(history_embeddings: list[list[Any]]) -> list[
 class UserTowerPredictRequest(BaseModel):
     # history_embeddings: [T, D] or [B, T, D]
     history_embeddings: list[list[float]] | list[list[list[float]]]
-    history_target_indices: list[str] | list[list[str]]
+    history_author_dids: list[str] | list[list[str]]
 
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
         he = self.history_embeddings
         shape = classify_history_embeddings_shape(he)
-        hti = self.history_target_indices
-        if not isinstance(hti, list):
-            raise ValueError("'history_target_indices' must be a list (of strings or list of list of strings)")
+        author_dids = self.history_author_dids
+        if not isinstance(author_dids, list):
+            raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
 
         match shape:
             case "single_empty":
-                if len(hti) != 0:
-                    raise ValueError("when 'history_embeddings' is empty, 'history_target_indices' must also be empty")
+                if len(author_dids) != 0:
+                    raise ValueError("when 'history_embeddings' is empty, 'history_author_dids' must also be empty")
                 return self
             case "single_history":
-                if len(hti) == 0 or isinstance(hti[0], list):
-                    raise ValueError("when 'history_embeddings' is a single history, 'history_target_indices' must be a list of strings, not a list of list of strings")
+                if len(author_dids) == 0 or isinstance(author_dids[0], list):
+                    raise ValueError("when 'history_embeddings' is a single history, 'history_author_dids' must be a list of strings, not a list of list of strings")
                 hist_len = _validate_single_user_history(he)
-                if len(hti) != hist_len:
-                    raise ValueError(f"length of 'history_target_indices' must match history length ({hist_len}) when 'history_embeddings' is a single history")
+                if len(author_dids) != hist_len:
+                    raise ValueError(f"length of 'history_author_dids' must match history length ({hist_len}) when 'history_embeddings' is a single history")
                 return self
             case "batched_history":
-                if len(hti) == 0 or isinstance(hti[0], str):
-                    raise ValueError("when 'history_embeddings' is batched, 'history_target_indices' must be a list of list of strings, not a list of strings")
+                if len(author_dids) == 0 or isinstance(author_dids[0], str):
+                    raise ValueError("when 'history_embeddings' is batched, 'history_author_dids' must be a list of list of strings, not a list of strings")
                 hist_len_list = _validate_batched_user_history(he)
-                if len(hti) != len(hist_len_list):
-                    raise ValueError(f"length of 'history_target_indices' must match batch size ({len(hist_len_list)}) when 'history_embeddings' is batched")
-                if not all(len(user_hti) == hist_len for user_hti, hist_len in zip(hti, hist_len_list)):
-                    raise ValueError(f"length of each user's 'history_target_indices' must match that user's history length when 'history_embeddings' is batched")
+                if len(author_dids) != len(hist_len_list):
+                    raise ValueError(f"length of 'history_author_dids' must match batch size ({len(hist_len_list)}) when 'history_embeddings' is batched")
+                if not all(len(user_hti) == hist_len for user_hti, hist_len in zip(author_dids, hist_len_list)):
+                    raise ValueError(f"length of each user's 'history_author_dids' must match that user's history length when 'history_embeddings' is batched")
                 return self
             case _:
                 assert_never(shape)
@@ -181,7 +182,7 @@ class UserTowerPredictRequest(BaseModel):
 class PostTowerPredictRequest(BaseModel):
     # post_embeddings: [D] or [B, D]
     post_embeddings: list[float] | list[list[float]]
-    target_author_indices: str | list[str]
+    target_author_dids: str | list[str]
 
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "PostTowerPredictRequest":
@@ -189,7 +190,7 @@ class PostTowerPredictRequest(BaseModel):
         if not isinstance(pe, list) or len(pe) == 0:
             raise ValueError("'post_embeddings' must be a non-empty list")
 
-        author_indices = self.target_author_indices
+        author_dids = self.target_author_dids
 
         is_batched = isinstance(pe[0], list)
         if is_batched:
@@ -203,16 +204,16 @@ class PostTowerPredictRequest(BaseModel):
                 raise ValueError("all post_embeddings vectors must have the same length")
             if GE_INFERENCE_EMBED_DIM and d0 != GE_INFERENCE_EMBED_DIM:
                 raise ValueError(f"expected D={GE_INFERENCE_EMBED_DIM}, got D={d0}")
-            if not isinstance(author_indices, list) or len(author_indices) != len(batch):
-                raise ValueError("when post_embeddings is batched, target_author_indices must be a list of the same length as the batch")
+            if not isinstance(author_dids, list) or len(author_dids) != len(batch):
+                raise ValueError("when post_embeddings is batched, target_author_dids must be a list of the same length as the batch")
         else:
             vec = pe  # type: ignore[assignment]
             if len(vec) == 0:
                 raise ValueError("'post_embeddings' must be non-empty")
             if GE_INFERENCE_EMBED_DIM and len(vec) != GE_INFERENCE_EMBED_DIM:
                 raise ValueError(f"expected D={GE_INFERENCE_EMBED_DIM}, got D={len(vec)}")
-            if not isinstance(author_indices, str):
-                raise ValueError("target_author_indices must be a single string when post_embeddings is not batched")
+            if not isinstance(author_dids, str):
+                raise ValueError("target_author_dids must be a single string when post_embeddings is not batched")
         return self
 
 
@@ -387,16 +388,6 @@ def _read_model_env(model_type: str, suffix: str) -> str | None:
     return os.getenv(f"GE_INFERENCE_{key}_{suffix}")
 
 
-def _infer_signature(model_type: ModelType) -> ModelSignature:
-    match model_type:
-        case "user-tower":
-            return "history"
-        case "post-tower":
-            return "vector"
-        case _:
-            assert_never(model_type)
-
-
 def _coerce_input(name: str, value: Any, dtype: torch.dtype, device: torch.device, non_batched_dim: int) -> torch.Tensor:
     t = _tensor_from_nested_list(name, value, dtype, device)
     if t.dim() == non_batched_dim:
@@ -436,14 +427,15 @@ def _warmup_entry(entry: LoadedModel) -> None:
 
     with torch.inference_mode():
         # Keep warmup short.
-        if entry.signature == "vector":
+        if entry.model_type == "post-tower":
             if GE_INFERENCE_EMBED_DIM <= 0:
                 return
-            dummy = torch.zeros((1, GE_INFERENCE_EMBED_DIM), dtype=DTYPE, device=device)
-            _ = model(dummy)
+            dummy_embedding = torch.zeros((1, GE_INFERENCE_EMBED_DIM), dtype=DTYPE, device=device)
+            dummy_author_idx = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
+            _ = model(dummy_embedding, dummy_author_idx)
             return
 
-        if entry.signature == "history":
+        if entry.model_type == "user-tower":
             if GE_INFERENCE_EMBED_DIM <= 0:
                 return
             history_embeddings = torch.zeros(
@@ -485,7 +477,6 @@ def _init_registry() -> None:
                 seen.add(env_model_type)
 
                 model_type: ModelType = _validate_model_type(env_model_type)
-                signature: ModelSignature = _infer_signature(model_type)
 
                 # Per-model sources.
                 model_path = _read_model_env(model_type, "MODEL_PATH")
@@ -502,7 +493,6 @@ def _init_registry() -> None:
 
                 models[model_type] = LoadedModel(
                     model_type=model_type,
-                    signature=signature,
                     configured_model_path=model_path,
                     configured_model_uri=model_uri,
                     configured_clearml_model_id=clearml_id,
@@ -555,9 +545,8 @@ def _load_entry(entry: LoadedModel) -> None:
     _warmup_entry(entry)
 
     logger.info(
-        "Model loaded | type=%s | signature=%s | model_id=%s | model_path=%s | device=%s",
+        "Model loaded | type=%s | model_id=%s | model_path=%s | device=%s",
         entry.model_type,
-        entry.signature,
         model_id,
         model_file,
         device,
@@ -611,6 +600,24 @@ def _require_ready(entry: LoadedModel) -> None:
             detail={"model_type": entry.model_type, "ready": False, "load_error": entry.load_error},
         )
 
+
+def _get_author_indices_from_dids(author_dids: str | list[str], device: torch.device) -> torch.Tensor:
+    if isinstance(author_dids, str):
+        author_dids = [author_dids]
+    else:
+        author_dids = author_dids
+
+    if _author_idx_by_did is None:
+        raise HTTPException(status_code=503, detail="Author idx map not loaded")
+
+    author_indices = [
+        _author_idx_by_did[did] if did in _author_idx_by_did
+        else AUTHOR_UNK_IDX
+        for did in author_dids
+    ]
+    return torch.tensor(author_indices, dtype=torch.int64, device=device)
+
+
 def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
     _require_ready(entry)
     assert entry.module is not None and entry.device is not None
@@ -661,7 +668,8 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     device=entry.device,
                     non_batched_dim=1,
                 )
-                y = entry.module(post_embeddings)
+                author_indices = _get_author_indices_from_dids(req.target_author_dids, device=entry.device)
+                y = entry.module(post_embeddings, author_indices)
                 return y
             case _:
                 assert_never(entry.model_type)
@@ -693,7 +701,6 @@ def ready():
         models_payload.append(
             {
                 "type": entry.model_type,
-                "signature": entry.signature,
                 "ready": model_ready,
                 "device": str(entry.device) if entry.device else None,
                 "model_path": entry.resolved_model_path,
@@ -734,7 +741,6 @@ def list_models() -> dict:
         models_payload.append(
             {
                 "type": entry.model_type,
-                "signature": entry.signature,
                 "ready": entry.module is not None and entry.device is not None and entry.load_error is None,
                 "device": str(entry.device) if entry.device else None,
                 "model_path": entry.resolved_model_path,
