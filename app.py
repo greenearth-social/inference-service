@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from hashlib import sha256
-from typing import Any, Dict, List, Literal, Optional, Union, Annotated, assert_never, get_args
+from typing import Any, Literal, Annotated, assert_never, get_args
 from urllib.parse import urlparse
 import logging
 
@@ -72,24 +72,24 @@ ModelSignature = Literal["vector", "history"]
 class LoadedModel:
     model_type: ModelType
     signature: ModelSignature
-    configured_model_path: Optional[str] = None
-    configured_model_uri: Optional[str] = None
-    configured_clearml_model_id: Optional[str] = None
+    configured_model_path: str | None = None
+    configured_model_uri: str | None = None
+    configured_clearml_model_id: str | None = None
 
-    module: Optional[torch.jit.ScriptModule] = None
-    device: Optional[torch.device] = None
-    resolved_model_path: Optional[str] = None
-    resolved_model_id: Optional[str] = None
+    module: torch.jit.ScriptModule | None = None
+    device: torch.device | None = None
+    resolved_model_path: str | None = None
+    resolved_model_id: str | None = None
 
-    load_error: Optional[str] = None
-    load_started_at: Optional[float] = None
-    load_finished_at: Optional[float] = None
+    load_error: str | None = None
+    load_started_at: float | None = None
+    load_finished_at: float | None = None
 
 
 _models_lock = threading.Lock()
 _models_initialized = False
-_models_init_error: Optional[str] = None
-_models: Dict[str, LoadedModel] = {}
+_models_init_error: str | None = None
+_models: dict[str, LoadedModel] = {}
 
 
 # -------------------------
@@ -125,7 +125,7 @@ def _validate_batched_user_history(history_embeddings: list[list[Any]]) -> None:
 
 class UserTowerPredictRequest(BaseModel):
     # history_embeddings: [T, D] or [B, T, D]
-    history_embeddings: Union[List[List[float]], List[List[List[float]]]]
+    history_embeddings: list[list[float]] | list[list[list[float]]]
 
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
@@ -147,7 +147,7 @@ class UserTowerPredictRequest(BaseModel):
 
 class PostTowerPredictRequest(BaseModel):
     # post_embeddings: [D] or [B, D]
-    post_embeddings: Union[List[float], List[List[float]]]
+    post_embeddings: list[float] | list[list[float]]
 
     @model_validator(mode="after")
     def _validate_post_embeddings(self) -> "PostTowerPredictRequest":
@@ -186,10 +186,7 @@ def _predict_request_discriminator(value: Any) -> str:
 
 
 PredictRequest = Annotated[
-    Union[
-        Annotated[UserTowerPredictRequest, Tag("user-tower")],
-        Annotated[PostTowerPredictRequest, Tag("post-tower")],
-    ],
+    Annotated[UserTowerPredictRequest, Tag("user-tower")] | Annotated[PostTowerPredictRequest, Tag("post-tower")],
     Discriminator(_predict_request_discriminator),
 ]
 
@@ -268,7 +265,7 @@ def _model_env_key(model_type: str) -> str:
     return "".join((c if c.isalnum() else "_") for c in model_type).upper()
 
 
-def _read_model_env(model_type: str, suffix: str) -> Optional[str]:
+def _read_model_env(model_type: str, suffix: str) -> str | None:
     key = _model_env_key(model_type)
     return os.getenv(f"GE_INFERENCE_{key}_{suffix}")
 
@@ -296,14 +293,14 @@ def _to_python(obj: Any) -> Any:
     if isinstance(obj, (list, tuple)):
         return [_to_python(x) for x in obj]
     if isinstance(obj, dict):
-        out: Dict[Any, Any] = {}
+        out: dict[Any, Any] = {}
         for k, v in obj.items():
             out[k] = _to_python(v)
         return out
     return obj
 
 
-def _format_timestamp(ts: Optional[float]) -> Optional[str]:
+def _format_timestamp(ts: float | None) -> str | None:
     if ts is None:
         return None
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
@@ -350,7 +347,7 @@ def _init_registry() -> None:
             return
 
         try:
-            models: Dict[str, LoadedModel] = {}
+            models: dict[str, LoadedModel] = {}
 
             models_env = os.getenv("GE_INFERENCE_MODELS", "").strip()
             if not models_env:
@@ -359,8 +356,8 @@ def _init_registry() -> None:
                     "and per-model GE_INFERENCE_{MODEL_TYPE}_MODEL_PATH/GE_INFERENCE_{MODEL_TYPE}_MODEL_URI/GE_INFERENCE_{MODEL_TYPE}_CLEARML_MODEL_ID env vars."
                 )
 
-            env_model_types: List[str] = []
-            env_model_types: List[str] = models_env.split(",")
+            env_model_types: list[str] = []
+            env_model_types: list[str] = models_env.split(",")
             if len(env_model_types) > 2:
                 raise RuntimeError(f"Too many models configured ({len(env_model_types)}). Max is 2.")
 
@@ -403,7 +400,7 @@ def _init_registry() -> None:
             _models_initialized = True
 
 
-def _resolve_model_file(entry: LoadedModel) -> tuple[str, Optional[str]]:
+def _resolve_model_file(entry: LoadedModel) -> tuple[str, str | None]:
     model_id = None
     if entry.configured_model_path:
         model_file = _find_model_file(entry.configured_model_path)
@@ -568,7 +565,7 @@ def ready():
     _init_registry()
     ensure_models_loaded()
 
-    models_payload: List[dict[str, Any]] = []
+    models_payload: list[dict[str, Any]] = []
     all_ready = _models_init_error is None and len(_models) > 0
     for entry in _models.values():
         model_ready = entry.module is not None and entry.device is not None and entry.load_error is None
@@ -602,7 +599,7 @@ def ready():
 def list_models() -> dict:
     _init_registry()
     ensure_models_loaded()
-    models_payload: List[dict[str, Any]] = []
+    models_payload: list[dict[str, Any]] = []
     for entry in _models.values():
         models_payload.append(
             {
