@@ -69,18 +69,61 @@ def _install_stub_modules() -> None:
         sys.modules["torch"] = torch
 
 
-def _load_app_module(module_name: str, *, max_batch: int = 4, embed_dim: int = 3, max_history_len: int = 8):
+def _load_app_module(
+    module_name: str,
+    *,
+    max_batch: int = 4,
+    embed_dim: int = 3,
+    max_history_len: int = 8,
+    author_idx_map_uri: str | None = None,
+):
     _install_stub_modules()
 
     os.environ["GE_INFERENCE_MAX_BATCH"] = str(max_batch)
     os.environ["GE_INFERENCE_EMBED_DIM"] = str(embed_dim)
     os.environ["GE_INFERENCE_MAX_HISTORY_LEN"] = str(max_history_len)
+    os.environ.pop("GE_INFERENCE_AUTHOR_MAP_URI", None)
+    if author_idx_map_uri is None:
+        os.environ.pop("GE_INFERENCE_AUTHOR_IDX_MAP_URI", None)
+    else:
+        os.environ["GE_INFERENCE_AUTHOR_IDX_MAP_URI"] = author_idx_map_uri
 
     spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _install_fake_pyarrow(monkeypatch, rows):
+    pyarrow = types.ModuleType("pyarrow")
+    parquet = types.ModuleType("pyarrow.parquet")
+
+    class FakeColumn:
+        def __init__(self, values):
+            self._values = values
+
+        def to_pylist(self):
+            return self._values
+
+    class FakeTable:
+        def __init__(self, table_rows):
+            self._columns = {
+                "author_did": [row["author_did"] for row in table_rows],
+                "author_idx": [row["author_idx"] for row in table_rows],
+            }
+
+        def __getitem__(self, name):
+            return FakeColumn(self._columns[name])
+
+    def read_table(_path, columns=None):
+        assert columns == ["author_did", "author_idx"]
+        return FakeTable(rows)
+
+    parquet.read_table = read_table
+    pyarrow.parquet = parquet
+    monkeypatch.setitem(sys.modules, "pyarrow", pyarrow)
+    monkeypatch.setitem(sys.modules, "pyarrow.parquet", parquet)
 
 
 @pytest.fixture(scope="module")
@@ -265,6 +308,49 @@ def test_post_tower_request_enforces_embed_dim(app_fixed_dim):
     app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_indices="author-1")
     with pytest.raises(ValueError, match="expected D=3"):
         app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0], target_author_indices="author-1")
+
+
+def test_author_idx_map_loads_from_configured_uri(tmp_path, monkeypatch):
+    parquet_path = tmp_path / "author_idx.parquet"
+    parquet_path.write_bytes(b"fake parquet")
+    _install_fake_pyarrow(
+        monkeypatch,
+        [
+            {"author_did": "did:plc:one", "author_idx": 2},
+            {"author_did": "did:plc:two", "author_idx": 3},
+        ],
+    )
+    app_author_map = _load_app_module(
+        "inference_service_app_author_map_tests",
+        author_idx_map_uri=str(parquet_path),
+    )
+
+    app_author_map.ensure_author_idx_map_loaded()
+
+    assert app_author_map._author_idx_by_did == {"did:plc:one": 2, "did:plc:two": 3}
+    assert app_author_map._author_idx_map_resolved_path == str(parquet_path)
+    assert app_author_map._author_idx_map_load_error is None
+
+
+def test_author_idx_map_rejects_duplicate_author_did(tmp_path, monkeypatch):
+    parquet_path = tmp_path / "author_idx.parquet"
+    parquet_path.write_bytes(b"fake parquet")
+    _install_fake_pyarrow(
+        monkeypatch,
+        [
+            {"author_did": "did:plc:one", "author_idx": 2},
+            {"author_did": "did:plc:one", "author_idx": 3},
+        ],
+    )
+    app_author_map = _load_app_module(
+        "inference_service_app_author_map_duplicate_tests",
+        author_idx_map_uri=str(parquet_path),
+    )
+
+    app_author_map.ensure_author_idx_map_loaded()
+
+    assert app_author_map._author_idx_by_did is None
+    assert "duplicate author_did" in app_author_map._author_idx_map_load_error
 
 
 def test_get_entry_or_404_returns_404_for_unknown_model(app_request, monkeypatch):
