@@ -380,22 +380,25 @@ def test_get_entry_or_404_returns_500_when_registry_init_failed(app_request, mon
 def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request, monkeypatch):
     captured = {}
 
-    def fake_pad(*, history_embeddings, max_history_len, embed_dim):
+    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices):
         captured["pad_args"] = {
             "history_embeddings": history_embeddings,
             "max_history_len": max_history_len,
             "embed_dim": embed_dim,
+            "author_indices": author_indices,
         }
-        return [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], [[1, 0]]
+        return [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], [[True, False]], [[7, 0]]
 
-    def user_model(history_embeddings, history_mask):
+    def user_model(history_embeddings, history_mask, author_indices):
         captured["model_inputs"] = {
             "history_embeddings": history_embeddings.value,
             "history_mask": history_mask.value,
+            "author_indices": author_indices.value,
         }
         return app_request.torch.Tensor([[42.0]])
 
     monkeypatch.setattr(app_request, "get_padded_embedding_history_and_mask_batched", fake_pad)
+    monkeypatch.setattr(app_request, "_author_idx_by_did", {"author-1": 7, "author-2": 8})
 
     entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = user_model
@@ -410,8 +413,10 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     assert captured["pad_args"]["history_embeddings"] == [[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]]
     assert captured["pad_args"]["max_history_len"] == app_request.GE_INFERENCE_MAX_HISTORY_LEN
     assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_EMBED_DIM
+    assert captured["pad_args"]["author_indices"] == [7, 8]
     assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
-    assert captured["model_inputs"]["history_mask"] == [[1, 0]]
+    assert captured["model_inputs"]["history_mask"] == [[True, False]]
+    assert captured["model_inputs"]["author_indices"] == [[7, 0]]
     assert out.tolist() == [[42.0]]
 
 
