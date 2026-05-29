@@ -83,11 +83,10 @@ def _load_app_module(
     os.environ["GE_INFERENCE_MAX_BATCH"] = str(max_batch)
     os.environ["GE_INFERENCE_EMBED_DIM"] = str(embed_dim)
     os.environ["GE_INFERENCE_MAX_HISTORY_LEN"] = str(max_history_len)
-    os.environ.pop("GE_INFERENCE_AUTHOR_MAP_URI", None)
     if author_idx_map_uri is None:
-        os.environ.pop("GE_INFERENCE_AUTHOR_IDX_MAP_URI", None)
+        os.environ.pop("GE_INFERENCE_AUTHOR_MAP_URI", None)
     else:
-        os.environ["GE_INFERENCE_AUTHOR_IDX_MAP_URI"] = author_idx_map_uri
+        os.environ["GE_INFERENCE_AUTHOR_MAP_URI"] = author_idx_map_uri
 
     spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -173,7 +172,7 @@ def test_rejects_top_level_list_that_does_not_contain_lists(app_shape):
 
 
 def test_requires_author_idx_map_uri():
-    with pytest.raises(ValueError, match="GE_INFERENCE_AUTHOR_IDX_MAP_URI"):
+    with pytest.raises(ValueError, match="GE_INFERENCE_AUTHOR_MAP_URI"):
         _load_app_module("inference_service_app_missing_author_map_tests", author_idx_map_uri=None)
 
 

@@ -59,11 +59,9 @@ GE_INFERENCE_MAX_BATCH: int | None = int(os.getenv("GE_INFERENCE_MAX_BATCH", "0"
 if GE_INFERENCE_MAX_BATCH == 0:
     GE_INFERENCE_MAX_BATCH = None
 
-GE_INFERENCE_AUTHOR_IDX_MAP_URI: str | None = (
-    os.getenv("GE_INFERENCE_AUTHOR_IDX_MAP_URI") or os.getenv("GE_INFERENCE_AUTHOR_MAP_URI")
-)
-if GE_INFERENCE_AUTHOR_IDX_MAP_URI is None:
-    raise ValueError("Must supply a valid GE_INFERENCE_AUTHOR_IDX_MAP_URI!")
+GE_INFERENCE_AUTHOR_MAP_URI: str = os.getenv("GE_INFERENCE_AUTHOR_MAP_URI", "")
+if GE_INFERENCE_AUTHOR_MAP_URI == "":
+    raise ValueError("Must supply a valid GE_INFERENCE_AUTHOR_MAP_URI!")
 
 DTYPE = torch.float32
 
@@ -328,8 +326,6 @@ def ensure_author_idx_map_loaded() -> None:
     global _author_idx_by_did, _author_idx_map_load_error
     global _author_idx_map_load_started_at, _author_idx_map_load_finished_at, _author_idx_map_resolved_path
 
-    if not GE_INFERENCE_AUTHOR_IDX_MAP_URI:
-        return
     if _author_idx_by_did is not None:
         return
 
@@ -341,20 +337,20 @@ def ensure_author_idx_map_loaded() -> None:
 
         _author_idx_map_load_started_at = time.time()
         try:
-            resolved_path = _resolve_author_idx_map_file(GE_INFERENCE_AUTHOR_IDX_MAP_URI)
+            resolved_path = _resolve_author_idx_map_file(GE_INFERENCE_AUTHOR_MAP_URI)
             _author_idx_by_did = _load_author_idx_map_from_parquet(resolved_path)
             _author_idx_map_resolved_path = resolved_path
             _author_idx_map_load_error = None
             logger.info(
                 "Author idx map loaded | source=%s | path=%s | entries=%s",
-                GE_INFERENCE_AUTHOR_IDX_MAP_URI,
+                GE_INFERENCE_AUTHOR_MAP_URI,
                 resolved_path,
                 len(_author_idx_by_did),
             )
         except Exception as e:
             _author_idx_by_did = None
             _author_idx_map_load_error = str(e)
-            logger.exception("Author idx map load failed | source=%s | error=%s", GE_INFERENCE_AUTHOR_IDX_MAP_URI, e)
+            logger.exception("Author idx map load failed | source=%s | error=%s", GE_INFERENCE_AUTHOR_MAP_URI, e)
         finally:
             _author_idx_map_load_finished_at = time.time()
 
@@ -719,9 +715,8 @@ def ready():
         "embed_dim": GE_INFERENCE_EMBED_DIM if GE_INFERENCE_EMBED_DIM > 0 else None,
         "max_seq_len": GE_INFERENCE_MAX_HISTORY_LEN,
         "author_idx_map": {
-            "configured": bool(GE_INFERENCE_AUTHOR_IDX_MAP_URI),
             "ready": author_idx_map_ready,
-            "uri": GE_INFERENCE_AUTHOR_IDX_MAP_URI,
+            "uri": GE_INFERENCE_AUTHOR_MAP_URI,
             "resolved_path": _author_idx_map_resolved_path,
             "num_entries": len(_author_idx_by_did) if _author_idx_by_did is not None else None,
             "load_error": _author_idx_map_load_error,
@@ -756,11 +751,8 @@ def list_models() -> dict:
         "models": models_payload,
         "registry_error": _models_init_error,
         "author_idx_map": {
-            "configured": bool(GE_INFERENCE_AUTHOR_IDX_MAP_URI),
-            "ready": not GE_INFERENCE_AUTHOR_IDX_MAP_URI or (
-                _author_idx_by_did is not None and _author_idx_map_load_error is None
-            ),
-            "uri": GE_INFERENCE_AUTHOR_IDX_MAP_URI,
+            "ready": _author_idx_by_did is not None and _author_idx_map_load_error is None,
+            "uri": GE_INFERENCE_AUTHOR_MAP_URI,
             "resolved_path": _author_idx_map_resolved_path,
             "num_entries": len(_author_idx_by_did) if _author_idx_by_did is not None else None,
             "load_error": _author_idx_map_load_error,
