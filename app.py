@@ -596,10 +596,8 @@ def _require_ready(entry: LoadedModel) -> None:
 
 def _get_single_author_idx_from_did(author_did: str, author_idx_by_did: dict[str, int]) -> int:
     if author_did in author_idx_by_did:
-        print(f"Found author_did='{author_did}' in idx map with idx={author_idx_by_did[author_did]}")
         return author_idx_by_did[author_did] 
     else:
-        print(f"Author_did='{author_did}' not found in idx map; using UNK idx={AUTHOR_UNK_IDX}")
         return AUTHOR_UNK_IDX
 
 
@@ -672,7 +670,6 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     post_embeddings = post_embeddings.unsqueeze(0) # add a batch dimension of size 1 at the beginning
 
                 author_indices_list = _get_author_indices_from_dids(req.target_author_dids)
-                print(f"Author indices: {author_indices_list}")
                 author_indices = _tensor_from_nested_list("target_author_dids", author_indices_list, torch.int64, entry.device)
                 y = entry.module(post_embeddings, author_indices)
                 return y

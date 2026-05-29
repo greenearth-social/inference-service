@@ -420,6 +420,44 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     assert out.tolist() == [[42.0]]
 
 
+def test_predict_with_entry_user_tower_uses_real_padding_for_author_indices(app_request, monkeypatch):
+    captured = {}
+
+    def user_model(history_embeddings, history_mask, author_indices):
+        captured["history_embeddings"] = history_embeddings.value
+        captured["history_mask"] = history_mask.value
+        captured["author_indices"] = author_indices.value
+        return app_request.torch.Tensor([[42.0]])
+
+    monkeypatch.setattr(app_request, "_author_idx_by_did", {"author-1": 7})
+
+    entry = app_request.LoadedModel(model_type="user-tower")
+    entry.module = user_model
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.UserTowerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+        history_author_dids=["author-1", "unknown-author"],
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["history_embeddings"] == [
+        [
+            [9.0, 8.0, 7.0],
+            [6.0, 5.0, 4.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    ]
+    assert captured["history_mask"] == [[True, True, False, False, False, False, False, False]]
+    assert captured["author_indices"] == [[7, app_request.AUTHOR_UNK_IDX, 0, 0, 0, 0, 0, 0]]
+    assert out.tolist() == [[42.0]]
+
+
 def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request, monkeypatch):
     captured = {}
 
