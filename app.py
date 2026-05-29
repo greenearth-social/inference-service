@@ -63,7 +63,7 @@ GE_INFERENCE_AUTHOR_MAP_URI: str = os.getenv("GE_INFERENCE_AUTHOR_MAP_URI", "")
 if GE_INFERENCE_AUTHOR_MAP_URI == "":
     raise ValueError("Must supply a valid GE_INFERENCE_AUTHOR_MAP_URI!")
 
-DTYPE = torch.float32
+DTYPE_FLOAT = torch.float32
 
 AUTHOR_PAD_IDX = 0
 AUTHOR_UNK_IDX = 1
@@ -419,7 +419,7 @@ def _warmup_entry(entry: LoadedModel) -> None:
         if entry.model_type == "post-tower":
             if GE_INFERENCE_EMBED_DIM <= 0:
                 return
-            dummy_embedding = torch.zeros((1, GE_INFERENCE_EMBED_DIM), dtype=DTYPE, device=device)
+            dummy_embedding = torch.zeros((1, GE_INFERENCE_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
             dummy_author_idx = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
             _ = model(dummy_embedding, dummy_author_idx)
             return
@@ -428,7 +428,7 @@ def _warmup_entry(entry: LoadedModel) -> None:
             if GE_INFERENCE_EMBED_DIM <= 0:
                 return
             history_embeddings = torch.zeros(
-                (1, GE_INFERENCE_MAX_HISTORY_LEN, GE_INFERENCE_EMBED_DIM), dtype=DTYPE, device=device
+                (1, GE_INFERENCE_MAX_HISTORY_LEN, GE_INFERENCE_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
             )
             history_mask = torch.ones((1, GE_INFERENCE_MAX_HISTORY_LEN), dtype=torch.bool, device=device)
             author_indices = torch.tensor([[AUTHOR_PAD_IDX] * GE_INFERENCE_MAX_HISTORY_LEN], dtype=torch.int64, device=device)
@@ -648,7 +648,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     embed_dim=GE_INFERENCE_EMBED_DIM,
                     author_indices=author_indices_list,
                 )
-                history_embeddings = _tensor_from_nested_list("history_embeddings", history_embeddings_padded, DTYPE, entry.device)
+                history_embeddings = _tensor_from_nested_list("history_embeddings", history_embeddings_padded, DTYPE_FLOAT, entry.device)
                 history_mask = _tensor_from_nested_list("history_mask", history_mask_padded, torch.bool, entry.device)
                 author_indices = _tensor_from_nested_list("author_indices", author_indices_padded, torch.int64, entry.device)
 
@@ -661,7 +661,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                         status_code=422,
                         detail=f"Model type '{entry.model_type}' expects a post-tower request body with 'post_embeddings'",
                     )
-                post_embeddings = _tensor_from_nested_list("post_embeddings", req.post_embeddings, DTYPE, entry.device)
+                post_embeddings = _tensor_from_nested_list("post_embeddings", req.post_embeddings, DTYPE_FLOAT, entry.device)
                 if post_embeddings.dim() == 1:
                     post_embeddings = post_embeddings.unsqueeze(0) # add a batch dimension of size 1 at the beginning
 
