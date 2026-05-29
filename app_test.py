@@ -191,10 +191,30 @@ def test_accepts_single_history(app_request):
     )
 
 
+def test_accepts_single_history_without_author_dids(app_request):
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    )
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        history_author_dids=None,
+    )
+
+
 def test_accepts_batched_histories_with_empty_entries(app_request):
     app_request.UserTowerPredictRequest(
         history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
         history_author_dids=[[], ["author-1", "author-2"], []],
+    )
+
+
+def test_accepts_batched_histories_without_author_dids(app_request):
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
+    )
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
+        history_author_dids=None,
     )
 
 
@@ -235,6 +255,13 @@ def test_rejects_single_history_with_mismatched_embedding_dimensions(app_request
         app_request.UserTowerPredictRequest(
             history_embeddings=[[1.0, 2.0], [3.0]],
             history_author_dids=["author-1", "author-2"],
+        )
+
+
+def test_rejects_single_history_with_mismatched_embedding_dimensions_without_author_dids(app_request):
+    with pytest.raises(ValueError, match="embedding dim must be 3"):
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[1.0, 2.0], [3.0]],
         )
 
 
@@ -285,6 +312,16 @@ def test_post_tower_request_accepts_unbatched_and_batched(app_request):
     app_request.PostTowerPredictRequest(
         post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
         target_author_dids=["author-1", "author-2"],
+    )
+
+
+def test_post_tower_request_accepts_missing_author_dids(app_request):
+    app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids=None)
+    app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    app_request.PostTowerPredictRequest(
+        post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        target_author_dids=None,
     )
 
 
@@ -457,6 +494,52 @@ def test_predict_with_entry_user_tower_uses_real_padding_for_author_indices(app_
     assert out.tolist() == [[42.0]]
 
 
+def test_predict_with_entry_user_tower_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
+    captured = {}
+
+    def user_model(history_embeddings, history_mask, author_indices):
+        captured["history_embeddings"] = history_embeddings.value
+        captured["history_mask"] = history_mask.value
+        captured["author_indices"] = author_indices.value
+        return app_request.torch.Tensor([[42.0]])
+
+    monkeypatch.setattr(app_request, "_author_idx_by_did", None)
+
+    entry = app_request.LoadedModel(model_type="user-tower")
+    entry.module = user_model
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.UserTowerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["history_embeddings"] == [
+        [
+            [9.0, 8.0, 7.0],
+            [6.0, 5.0, 4.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    ]
+    assert captured["history_mask"] == [[True, True, False, False, False, False, False, False]]
+    assert captured["author_indices"] == [[
+        app_request.AUTHOR_UNK_IDX,
+        app_request.AUTHOR_UNK_IDX,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]]
+    assert out.tolist() == [[42.0]]
+
+
 def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request, monkeypatch):
     captured = {}
 
@@ -477,6 +560,30 @@ def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request, mo
     assert captured["post_embeddings"] == [[1.0, 2.0, 3.0]]
     assert captured["author_indices"] == [7]
     assert out.tolist() == [[2.0]]
+
+
+def test_predict_with_entry_post_tower_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
+    captured = {}
+
+    def post_model(post_embeddings, author_indices):
+        captured["post_embeddings"] = post_embeddings.value
+        captured["author_indices"] = author_indices.value
+        return app_request.torch.Tensor([[2.0], [3.0]])
+
+    monkeypatch.setattr(app_request, "_author_idx_by_did", None)
+
+    entry = app_request.LoadedModel(model_type="post-tower")
+    entry.module = post_model
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.PostTowerPredictRequest(
+        post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["post_embeddings"] == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    assert captured["author_indices"] == [app_request.AUTHOR_UNK_IDX, app_request.AUTHOR_UNK_IDX]
+    assert out.tolist() == [[2.0], [3.0]]
 
 
 def test_predict_with_entry_rejects_request_type_mismatch(app_request):
