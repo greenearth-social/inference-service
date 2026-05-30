@@ -11,6 +11,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[0]
 APP_PATH = REPO_ROOT / "app.py"
+DEFAULT_AUTHOR_IDX_MAP_URI = "gs://test-bucket/author_idx.parquet"
 
 
 def _install_stub_modules() -> None:
@@ -69,18 +70,60 @@ def _install_stub_modules() -> None:
         sys.modules["torch"] = torch
 
 
-def _load_app_module(module_name: str, *, max_batch: int = 4, embed_dim: int = 3, max_history_len: int = 8):
+def _load_app_module(
+    module_name: str,
+    *,
+    max_batch: int = 4,
+    embed_dim: int = 3,
+    max_history_len: int = 8,
+    author_idx_map_uri: str | None = DEFAULT_AUTHOR_IDX_MAP_URI,
+):
     _install_stub_modules()
 
     os.environ["GE_INFERENCE_MAX_BATCH"] = str(max_batch)
     os.environ["GE_INFERENCE_EMBED_DIM"] = str(embed_dim)
     os.environ["GE_INFERENCE_MAX_HISTORY_LEN"] = str(max_history_len)
+    if author_idx_map_uri is None:
+        os.environ.pop("GE_INFERENCE_AUTHOR_MAP_URI", None)
+    else:
+        os.environ["GE_INFERENCE_AUTHOR_MAP_URI"] = author_idx_map_uri
 
     spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def _install_fake_pyarrow(monkeypatch, rows):
+    pyarrow = types.ModuleType("pyarrow")
+    parquet = types.ModuleType("pyarrow.parquet")
+
+    class FakeColumn:
+        def __init__(self, values):
+            self._values = values
+
+        def to_pylist(self):
+            return self._values
+
+    class FakeTable:
+        def __init__(self, table_rows):
+            self._columns = {
+                "author_did": [row["author_did"] for row in table_rows],
+                "author_idx": [row["author_idx"] for row in table_rows],
+            }
+
+        def __getitem__(self, name):
+            return FakeColumn(self._columns[name])
+
+    def read_table(_path, columns=None):
+        assert columns == ["author_did", "author_idx"]
+        return FakeTable(rows)
+
+    parquet.read_table = read_table
+    pyarrow.parquet = parquet
+    monkeypatch.setitem(sys.modules, "pyarrow", pyarrow)
+    monkeypatch.setitem(sys.modules, "pyarrow.parquet", parquet)
 
 
 @pytest.fixture(scope="module")
@@ -128,34 +171,98 @@ def test_rejects_top_level_list_that_does_not_contain_lists(app_shape):
         app_shape.classify_history_embeddings_shape([1.0, 2.0])
 
 
+def test_requires_author_idx_map_uri():
+    with pytest.raises(ValueError, match="GE_INFERENCE_AUTHOR_MAP_URI"):
+        _load_app_module("inference_service_app_missing_author_map_tests", author_idx_map_uri=None)
+
+
 def test_accepts_empty_flat_history(app_request):
-    app_request.UserTowerPredictRequest(history_embeddings=[])
+    app_request.UserTowerPredictRequest(history_embeddings=[], history_author_dids=[])
 
 
 def test_accepts_empty_nested_history(app_request):
-    app_request.UserTowerPredictRequest(history_embeddings=[[]])
+    app_request.UserTowerPredictRequest(history_embeddings=[[]], history_author_dids=[])
 
 
 def test_accepts_single_history(app_request):
-    app_request.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        history_author_dids=["author-1", "author-2"],
+    )
+
+
+def test_accepts_single_history_without_author_dids(app_request):
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    )
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        history_author_dids=None,
+    )
 
 
 def test_accepts_batched_histories_with_empty_entries(app_request):
     app_request.UserTowerPredictRequest(
-        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]]
+        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
+        history_author_dids=[[], ["author-1", "author-2"], []],
     )
+
+
+def test_accepts_batched_histories_without_author_dids(app_request):
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
+    )
+    app_request.UserTowerPredictRequest(
+        history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
+        history_author_dids=None,
+    )
+
+
+def test_rejects_single_history_author_dids_length_mismatch(app_request):
+    with pytest.raises(ValueError, match="must match history length"):
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            history_author_dids=["author-1"],
+        )
+
+
+def test_rejects_batched_history_author_dids_shape_mismatch(app_request):
+    with pytest.raises(ValueError, match="must be a list of list of strings"):
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
+            history_author_dids=["author-1", "author-2"],
+        )
+
+
+def test_rejects_batched_history_author_dids_length_mismatch(app_request):
+    with pytest.raises(ValueError, match="must match that user's history length"):
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [[]]],
+            history_author_dids=[[], ["author-1"], []],
+        )
 
 
 def test_rejects_batched_history_over_max_batch(app_request):
     with pytest.raises(ValueError, match="batch too large"):
         app_request.UserTowerPredictRequest(
-            history_embeddings=[[[1.0]], [[2.0]], [[3.0]], [[4.0]]]
+            history_embeddings=[[[1.0]], [[2.0]], [[3.0]], [[4.0]]],
+            history_author_dids=[["author-1"], ["author-2"], ["author-3"], ["author-4"]],
         )
 
 
 def test_rejects_single_history_with_mismatched_embedding_dimensions(app_request):
     with pytest.raises(ValueError, match="embedding dim must be 3"):
-        app_request.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0], [3.0]])
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[1.0, 2.0], [3.0]],
+            history_author_dids=["author-1", "author-2"],
+        )
+
+
+def test_rejects_single_history_with_mismatched_embedding_dimensions_without_author_dids(app_request):
+    with pytest.raises(ValueError, match="embedding dim must be 3"):
+        app_request.UserTowerPredictRequest(
+            history_embeddings=[[1.0, 2.0], [3.0]],
+        )
 
 
 def test_rejects_mixed_rank_batch_entry(app_request):
@@ -169,19 +276,29 @@ def test_rejects_non_list_user_entry_in_batch(app_request):
 
 
 def test_accepts_histories_matching_fixed_embedding_dim(app_fixed_dim):
-    app_fixed_dim.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0, 3.0]])
-    app_fixed_dim.UserTowerPredictRequest(history_embeddings=[[[1.0, 2.0, 3.0]], []])
+    app_fixed_dim.UserTowerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0]],
+        history_author_dids=["author-1"],
+    )
+    app_fixed_dim.UserTowerPredictRequest(
+        history_embeddings=[[[1.0, 2.0, 3.0]], []],
+        history_author_dids=[["author-1"], []],
+    )
 
 
 def test_rejects_single_history_that_violates_fixed_embedding_dim(app_fixed_dim):
     with pytest.raises(ValueError, match="embedding dim must be 3"):
-        app_fixed_dim.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0]])
+        app_fixed_dim.UserTowerPredictRequest(
+            history_embeddings=[[1.0, 2.0]],
+            history_author_dids=["author-1"],
+        )
 
 
 def test_rejects_batched_history_that_violates_fixed_embedding_dim(app_fixed_dim):
     with pytest.raises(ValueError, match="embedding dim must be 3"):
         app_fixed_dim.UserTowerPredictRequest(
-            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0]]]
+            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0]]],
+            history_author_dids=[["author-1"], ["author-2"]],
         )
 
 
@@ -191,19 +308,91 @@ def test_rejects_zero_width_embedding_row(app_fixed_dim):
 
 
 def test_post_tower_request_accepts_unbatched_and_batched(app_request):
+    app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
+    app_request.PostTowerPredictRequest(
+        post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        target_author_dids=["author-1", "author-2"],
+    )
+
+
+def test_post_tower_request_accepts_missing_author_dids(app_request):
     app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids=None)
     app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    app_request.PostTowerPredictRequest(
+        post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        target_author_dids=None,
+    )
 
 
 def test_post_tower_request_rejects_ragged_batched_vectors(app_request):
     with pytest.raises(ValueError, match="same length"):
-        app_request.PostTowerPredictRequest(post_embeddings=[[1.0, 2.0], [3.0]])
+        app_request.PostTowerPredictRequest(
+            post_embeddings=[[1.0, 2.0], [3.0]],
+            target_author_dids=["author-1", "author-2"],
+        )
+
+
+def test_post_tower_request_rejects_author_did_shape_mismatch(app_request):
+    with pytest.raises(ValueError, match="same length as the batch"):
+        app_request.PostTowerPredictRequest(
+            post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            target_author_dids=["author-1"],
+        )
+    with pytest.raises(ValueError, match="single string"):
+        app_request.PostTowerPredictRequest(
+            post_embeddings=[1.0, 2.0, 3.0],
+            target_author_dids=["author-1"],
+        )
 
 
 def test_post_tower_request_enforces_embed_dim(app_fixed_dim):
-    app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
     with pytest.raises(ValueError, match="expected D=3"):
-        app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0])
+        app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0], target_author_dids="author-1")
+
+
+def test_author_idx_map_loads_from_configured_uri(tmp_path, monkeypatch):
+    parquet_path = tmp_path / "author_idx.parquet"
+    parquet_path.write_bytes(b"fake parquet")
+    _install_fake_pyarrow(
+        monkeypatch,
+        [
+            {"author_did": "did:plc:one", "author_idx": 2},
+            {"author_did": "did:plc:two", "author_idx": 3},
+        ],
+    )
+    app_author_map = _load_app_module(
+        "inference_service_app_author_map_tests",
+        author_idx_map_uri=str(parquet_path),
+    )
+
+    app_author_map.ensure_author_idx_map_loaded()
+
+    assert app_author_map._author_idx_by_did == {"did:plc:one": 2, "did:plc:two": 3}
+    assert app_author_map._author_idx_map_resolved_path == str(parquet_path)
+    assert app_author_map._author_idx_map_load_error is None
+
+
+def test_author_idx_map_rejects_duplicate_author_did(tmp_path, monkeypatch):
+    parquet_path = tmp_path / "author_idx.parquet"
+    parquet_path.write_bytes(b"fake parquet")
+    _install_fake_pyarrow(
+        monkeypatch,
+        [
+            {"author_did": "did:plc:one", "author_idx": 2},
+            {"author_did": "did:plc:one", "author_idx": 3},
+        ],
+    )
+    app_author_map = _load_app_module(
+        "inference_service_app_author_map_duplicate_tests",
+        author_idx_map_uri=str(parquet_path),
+    )
+
+    app_author_map.ensure_author_idx_map_loaded()
+
+    assert app_author_map._author_idx_by_did is None
+    assert "duplicate author_did" in app_author_map._author_idx_map_load_error
 
 
 def test_get_entry_or_404_returns_404_for_unknown_model(app_request, monkeypatch):
@@ -227,62 +416,182 @@ def test_get_entry_or_404_returns_500_when_registry_init_failed(app_request, mon
 def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request, monkeypatch):
     captured = {}
 
-    def fake_pad(*, history_embeddings, max_history_len, embed_dim):
+    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices):
         captured["pad_args"] = {
             "history_embeddings": history_embeddings,
             "max_history_len": max_history_len,
             "embed_dim": embed_dim,
+            "author_indices": author_indices,
         }
-        return [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], [[1, 0]]
+        return [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], [[True, False]], [[7, 0]]
 
-    def user_model(history_embeddings, history_mask):
+    def user_model(history_embeddings, history_mask, author_indices):
         captured["model_inputs"] = {
             "history_embeddings": history_embeddings.value,
             "history_mask": history_mask.value,
+            "author_indices": author_indices.value,
         }
         return app_request.torch.Tensor([[42.0]])
 
     monkeypatch.setattr(app_request, "get_padded_embedding_history_and_mask_batched", fake_pad)
+    monkeypatch.setattr(app_request, "_author_idx_by_did", {"author-1": 7, "author-2": 8})
 
-    entry = app_request.LoadedModel(model_type="user-tower", signature="history")
+    entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = user_model
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.UserTowerPredictRequest(history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]])
+    req = app_request.UserTowerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+        history_author_dids=["author-1", "author-2"],
+    )
     out = app_request._predict_with_entry(entry, req)
 
     assert captured["pad_args"]["history_embeddings"] == [[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]]
     assert captured["pad_args"]["max_history_len"] == app_request.GE_INFERENCE_MAX_HISTORY_LEN
     assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_EMBED_DIM
+    assert captured["pad_args"]["author_indices"] == [7, 8]
     assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
-    assert captured["model_inputs"]["history_mask"] == [[1, 0]]
+    assert captured["model_inputs"]["history_mask"] == [[True, False]]
+    assert captured["model_inputs"]["author_indices"] == [[7, 0]]
     assert out.tolist() == [[42.0]]
 
 
-def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request):
+def test_predict_with_entry_user_tower_uses_real_padding_for_author_indices(app_request, monkeypatch):
     captured = {}
 
-    def post_model(post_embeddings):
+    def user_model(history_embeddings, history_mask, author_indices):
+        captured["history_embeddings"] = history_embeddings.value
+        captured["history_mask"] = history_mask.value
+        captured["author_indices"] = author_indices.value
+        return app_request.torch.Tensor([[42.0]])
+
+    monkeypatch.setattr(app_request, "_author_idx_by_did", {"author-1": 7})
+
+    entry = app_request.LoadedModel(model_type="user-tower")
+    entry.module = user_model
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.UserTowerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+        history_author_dids=["author-1", "unknown-author"],
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["history_embeddings"] == [
+        [
+            [9.0, 8.0, 7.0],
+            [6.0, 5.0, 4.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    ]
+    assert captured["history_mask"] == [[True, True, False, False, False, False, False, False]]
+    assert captured["author_indices"] == [[7, app_request.AUTHOR_UNK_IDX, 0, 0, 0, 0, 0, 0]]
+    assert out.tolist() == [[42.0]]
+
+
+def test_predict_with_entry_user_tower_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
+    captured = {}
+
+    def user_model(history_embeddings, history_mask, author_indices):
+        captured["history_embeddings"] = history_embeddings.value
+        captured["history_mask"] = history_mask.value
+        captured["author_indices"] = author_indices.value
+        return app_request.torch.Tensor([[42.0]])
+
+    monkeypatch.setattr(app_request, "_author_idx_by_did", None)
+
+    entry = app_request.LoadedModel(model_type="user-tower")
+    entry.module = user_model
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.UserTowerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["history_embeddings"] == [
+        [
+            [9.0, 8.0, 7.0],
+            [6.0, 5.0, 4.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+    ]
+    assert captured["history_mask"] == [[True, True, False, False, False, False, False, False]]
+    assert captured["author_indices"] == [[
+        app_request.AUTHOR_UNK_IDX,
+        app_request.AUTHOR_UNK_IDX,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]]
+    assert out.tolist() == [[42.0]]
+
+
+def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request, monkeypatch):
+    captured = {}
+
+    def post_model(post_embeddings, author_indices):
         captured["post_embeddings"] = post_embeddings.value
+        captured["author_indices"] = author_indices.value
         return app_request.torch.Tensor([[2.0]])
 
-    entry = app_request.LoadedModel(model_type="post-tower", signature="vector")
+    monkeypatch.setattr(app_request, "_author_idx_by_did", {"author-1": 7})
+
+    entry = app_request.LoadedModel(model_type="post-tower")
     entry.module = post_model
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
     out = app_request._predict_with_entry(entry, req)
 
     assert captured["post_embeddings"] == [[1.0, 2.0, 3.0]]
+    assert captured["author_indices"] == [7]
     assert out.tolist() == [[2.0]]
 
 
+def test_predict_with_entry_post_tower_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
+    captured = {}
+
+    def post_model(post_embeddings, author_indices):
+        captured["post_embeddings"] = post_embeddings.value
+        captured["author_indices"] = author_indices.value
+        return app_request.torch.Tensor([[2.0], [3.0]])
+
+    monkeypatch.setattr(app_request, "_author_idx_by_did", None)
+
+    entry = app_request.LoadedModel(model_type="post-tower")
+    entry.module = post_model
+    entry.device = app_request.torch.device("cpu")
+
+    req = app_request.PostTowerPredictRequest(
+        post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["post_embeddings"] == [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    assert captured["author_indices"] == [app_request.AUTHOR_UNK_IDX, app_request.AUTHOR_UNK_IDX]
+    assert out.tolist() == [[2.0], [3.0]]
+
+
 def test_predict_with_entry_rejects_request_type_mismatch(app_request):
-    entry = app_request.LoadedModel(model_type="user-tower", signature="history")
+    entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = Mock()
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0])
+    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
 
     with pytest.raises(app_request.HTTPException) as exc_info:
         app_request._predict_with_entry(entry, req)
@@ -292,7 +601,7 @@ def test_predict_with_entry_rejects_request_type_mismatch(app_request):
 
 
 def test_require_ready_raises_503_when_model_not_loaded(app_request, monkeypatch):
-    entry = app_request.LoadedModel(model_type="user-tower", signature="history")
+    entry = app_request.LoadedModel(model_type="user-tower")
     monkeypatch.setattr(app_request, "ensure_models_loaded", lambda: None)
 
     with pytest.raises(app_request.HTTPException) as exc_info:

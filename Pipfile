@@ -9,6 +9,7 @@ uvicorn = {extras = ["standard"], version = "*"}
 pydantic = "*"
 clearml = "*"
 google-cloud-storage = "*"
+pyarrow = "*"
 shared = {git = "https://github.com/greenearth-social/engagement-prediction.git", ref = "main"}
 
 [dev-packages]
