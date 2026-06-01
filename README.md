@@ -256,6 +256,7 @@ Deploy to Cloud Run:
   --models user-tower,post-tower \
   --user-tower-model-uri gs://my-bucket/user_tower.pt \
   --post-tower-model-uri gs://my-bucket/post_tower.pt \
+  --author-map-uri gs://my-bucket/author_idx.parquet \
   --max-history-len 128
 ```
 
@@ -266,6 +267,7 @@ GE_ENVIRONMENT=prod \
 GE_INFERENCE_MODELS=user-tower,post-tower \
 GE_INFERENCE_USER_TOWER_MODEL_URI=gs://my-bucket/user_tower.pt \
 GE_INFERENCE_POST_TOWER_MODEL_URI=gs://my-bucket/post_tower.pt \
+GE_INFERENCE_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet \
 GE_INFERENCE_MAX_HISTORY_LEN=128 \
 ./scripts/deploy.sh
 ```
@@ -315,6 +317,7 @@ Inference configuration:
 - `GE_INFERENCE_POST_TOWER_MODEL_URI`: GCS URI for the post-tower model
 - `GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID`: ClearML model ID for the user-tower model
 - `GE_INFERENCE_POST_TOWER_CLEARML_MODEL_ID`: ClearML model ID for the post-tower model
+- `GE_INFERENCE_AUTHOR_MAP_URI`: GCS URI or local path for the author idx parquet map
 
 Runtime configuration used by the app:
 
@@ -323,4 +326,5 @@ Runtime configuration used by the app:
 - `GE_INFERENCE_PREFER_CUDA`: choose CUDA when available
 - `GE_INFERENCE_WARMUP`: whether to run warmup on startup
 - `GE_INFERENCE_EMBED_DIM`: optional embedding dimension check
+- `GE_INFERENCE_AUTHOR_MAP_URI`: GCS URI or local path for the author idx parquet map
 - `GE_INFERENCE_MODEL_CACHE_DIR`: local cache dir for downloaded `gs://` models
