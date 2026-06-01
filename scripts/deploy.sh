@@ -24,6 +24,7 @@ GE_INFERENCE_USER_TOWER_MODEL_URI="${GE_INFERENCE_USER_TOWER_MODEL_URI:-}"
 GE_INFERENCE_POST_TOWER_MODEL_URI="${GE_INFERENCE_POST_TOWER_MODEL_URI:-}"
 GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID="${GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID:-}"
 GE_INFERENCE_POST_TOWER_CLEARML_MODEL_ID="${GE_INFERENCE_POST_TOWER_CLEARML_MODEL_ID:-}"
+GE_INFERENCE_AUTHOR_MAP_URI="${GE_INFERENCE_AUTHOR_MAP_URI:-}"
 GE_INFERENCE_MAX_HISTORY_LEN="${GE_INFERENCE_MAX_HISTORY_LEN:-128}"
 GE_INFERENCE_EMBED_DIM="${GE_INFERENCE_EMBED_DIM:-384}"
 GE_INFERENCE_MAX_BATCH="${GE_INFERENCE_MAX_BATCH:-0}"
@@ -131,6 +132,12 @@ validate_config() {
     if [ -z "$GE_INFERENCE_EMBED_DIM" ] || ! [[ "$GE_INFERENCE_EMBED_DIM" =~ ^[1-9][0-9]*$ ]]; then
         log_error "GE_INFERENCE_EMBED_DIM is required and must be a positive integer."
         log_error "Example: GE_INFERENCE_EMBED_DIM=384 ./deploy.sh"
+        exit 1
+    fi
+
+    if [ -z "$GE_INFERENCE_AUTHOR_MAP_URI" ]; then
+        log_error "GE_INFERENCE_AUTHOR_MAP_URI is required."
+        log_error "Example: GE_INFERENCE_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet ./deploy.sh"
         exit 1
     fi
 
@@ -260,6 +267,7 @@ GE_INFERENCE_MODELS: "$GE_INFERENCE_MODELS"
 GE_INFERENCE_MAX_HISTORY_LEN: "$GE_INFERENCE_MAX_HISTORY_LEN"
 GE_INFERENCE_EMBED_DIM: "$GE_INFERENCE_EMBED_DIM"
 GE_INFERENCE_MAX_BATCH: "$GE_INFERENCE_MAX_BATCH"
+GE_INFERENCE_AUTHOR_MAP_URI: "$GE_INFERENCE_AUTHOR_MAP_URI"
 GE_INFERENCE_PREFER_CUDA: "0"
 GE_INFERENCE_WARMUP: "0"
 EOF
@@ -350,6 +358,10 @@ while [[ $# -gt 0 ]]; do
             GE_INFERENCE_POST_TOWER_MODEL_URI="$2"
             shift 2
             ;;
+        --author-map-uri)
+            GE_INFERENCE_AUTHOR_MAP_URI="$2"
+            shift 2
+            ;;
         --max-history-len)
             GE_INFERENCE_MAX_HISTORY_LEN="$2"
             shift 2
@@ -389,6 +401,7 @@ while [[ $# -gt 0 ]]; do
             echo "                                   Supported: user-tower, post-tower"
             echo "  --user-tower-model-uri URI        GCS URI for the user-tower model"
             echo "  --post-tower-model-uri URI        GCS URI for the post-tower model"
+            echo "  --author-map-uri URI              GCS URI or local path for the author idx parquet map"
             echo "  --max-history-len N              Maximum user history sequence length (required)"
             echo "  --inference-domain DOMAIN         Custom mapped domain for inference service"
             echo "  --disable-domain-mapping          Skip domain mapping reconciliation"
@@ -408,6 +421,7 @@ while [[ $# -gt 0 ]]; do
             echo "  GE_INFERENCE_POST_TOWER_MODEL_URI        GCS URI for post-tower model"
             echo "  GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID ClearML model ID for user-tower"
             echo "  GE_INFERENCE_POST_TOWER_CLEARML_MODEL_ID ClearML model ID for post-tower"
+            echo "  GE_INFERENCE_AUTHOR_MAP_URI              GCS URI or local path for the author idx parquet map"
             echo "  GE_ENABLE_INFERENCE_DOMAIN_MAPPING        true/false toggle (default: true)"
             echo "  GE_INFERENCE_DOMAIN                       Custom mapped domain"
             echo "  GE_INFERENCE_MIN_INSTANCES                Minimum Cloud Run instances (default: 1)"
@@ -420,6 +434,7 @@ while [[ $# -gt 0 ]]; do
             echo "     --models user-tower,post-tower \\"
             echo "     --user-tower-model-uri gs://my-bucket/user_tower.pt \\"
             echo "     --post-tower-model-uri gs://my-bucket/post_tower.pt \\"
+            echo "     --author-map-uri gs://my-bucket/author_idx.parquet \\"
             echo "     --max-history-len 50"
             exit 0
             ;;
