@@ -85,6 +85,7 @@ class LoadedModel:
     device: torch.device | None = None
     resolved_model_path: str | None = None
     resolved_model_id: str | None = None
+    model_uuid: str | None = None
 
     load_error: str | None = None
     load_started_at: float | None = None
@@ -294,6 +295,14 @@ def _download_gcs_uri_to_local(gs_uri: str) -> str:
     return local_path
 
 
+def _load_manifest(uri: str) -> dict:
+    """Load the two_tower_serving_manifest.json from a local path or GCS URI."""
+    import json
+    path = _download_gcs_uri_to_local(uri) if uri.startswith("gs://") else uri
+    with open(path) as f:
+        return json.load(f)
+
+
 def _resolve_author_idx_map_file(author_idx_map_uri: str) -> str:
     parsed = urlparse(author_idx_map_uri)
     if parsed.scheme == "gs":
@@ -462,17 +471,30 @@ def _init_registry() -> None:
         try:
             models: dict[str, LoadedModel] = {}
 
+            manifest_uri = os.getenv("GE_INFERENCE_MANIFEST_URI", "").strip()
+            if not manifest_uri:
+                raise RuntimeError(
+                    "GE_INFERENCE_MANIFEST_URI is required — set it to the GCS URI or local path of "
+                    "the two_tower_serving_manifest.json produced by training."
+                )
+
+            manifest = _load_manifest(manifest_uri)
+            post_tower_uri = manifest["post_tower_uri"]
+            post_tower_uuid = manifest["post_tower_clearml_model_id"]
+            user_tower_uri = manifest["user_tower_uri"]
+            user_tower_uuid = manifest["user_tower_clearml_model_id"]
+
             models_env = os.getenv("GE_INFERENCE_MODELS", "").strip()
             if not models_env:
                 raise RuntimeError(
-                    "No models configured. Set GE_INFERENCE_MODELS (e.g. 'user-tower,post-tower') "
-                    "and per-model GE_INFERENCE_{MODEL_TYPE}_MODEL_PATH/GE_INFERENCE_{MODEL_TYPE}_MODEL_URI/GE_INFERENCE_{MODEL_TYPE}_CLEARML_MODEL_ID env vars."
+                    "No models configured. Set GE_INFERENCE_MODELS (e.g. 'user-tower,post-tower')."
                 )
 
-            env_model_types: list[str] = []
             env_model_types: list[str] = models_env.split(",")
             if len(env_model_types) > 2:
                 raise RuntimeError(f"Too many models configured ({len(env_model_types)}). Max is 2.")
+
+            tower_uris = {"post-tower": (post_tower_uri, post_tower_uuid), "user-tower": (user_tower_uri, user_tower_uuid)}
 
             seen: set[str] = set()
             for env_model_type in env_model_types:
@@ -481,25 +503,12 @@ def _init_registry() -> None:
                 seen.add(env_model_type)
 
                 model_type: ModelType = _validate_model_type(env_model_type)
-
-                # Per-model sources.
-                model_path = _read_model_env(model_type, "MODEL_PATH")
-                model_uri = _read_model_env(model_type, "MODEL_URI")
-                clearml_id = _read_model_env(model_type, "CLEARML_MODEL_ID")
-
-                if not (model_path or model_uri or clearml_id):
-                    raise RuntimeError(
-                        f"Model '{model_type}' is missing a source. "
-                        f"Set one of: GE_INFERENCE_{_model_env_key(model_type)}_MODEL_PATH | "
-                        f"GE_INFERENCE_{_model_env_key(model_type)}_MODEL_URI | "
-                        f"GE_INFERENCE_{_model_env_key(model_type)}_CLEARML_MODEL_ID"
-                    )
+                uri, model_uuid = tower_uris[model_type]
 
                 models[model_type] = LoadedModel(
                     model_type=model_type,
-                    configured_model_path=model_path,
-                    configured_model_uri=model_uri,
-                    configured_clearml_model_id=clearml_id,
+                    configured_model_uri=uri,
+                    model_uuid=model_uuid,
                 )
 
             _models = models
@@ -727,6 +736,7 @@ def ready():
         models_payload.append(
             {
                 "type": entry.model_type,
+                "model_uuid": entry.model_uuid,
                 "ready": model_ready,
                 "device": str(entry.device) if entry.device else None,
                 "model_path": entry.resolved_model_path,
@@ -799,4 +809,4 @@ def predict_model(model_name: str, req: PredictRequest = Body(...)) -> dict:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Inference failed: {e}")
-    return {"outputs": _to_python(y), "model_type": entry.model_type}
+    return {"outputs": _to_python(y), "model_type": entry.model_type, "model_uuid": entry.model_uuid}

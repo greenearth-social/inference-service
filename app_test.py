@@ -15,6 +15,19 @@ DEFAULT_AUTHOR_IDX_MAP_URI = "gs://test-bucket/author_idx.parquet"
 
 
 def _install_stub_modules() -> None:
+    if "clearml" not in sys.modules:
+        clearml = types.ModuleType("clearml")
+
+        class FakeModel:
+            def __init__(self, model_id=None):
+                self.model_id = model_id
+
+            def get_local_copy(self):
+                raise RuntimeError("ClearML not available in test environment")
+
+        clearml.Model = FakeModel
+        sys.modules["clearml"] = clearml
+
     if "torch" not in sys.modules:
         torch = types.ModuleType("torch")
 
@@ -610,3 +623,120 @@ def test_require_ready_raises_503_when_model_not_loaded(app_request, monkeypatch
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail["model_type"] == "user-tower"
     assert exc_info.value.detail["ready"] is False
+
+
+# --- Manifest loading tests ---
+
+SAMPLE_MANIFEST = {
+    "post_tower_clearml_model_id": "post-model-abc123",
+    "user_tower_clearml_model_id": "user-model-def456",
+    "post_tower_uri": "gs://fake-bucket/post_tower.pt",
+    "user_tower_uri": "gs://fake-bucket/user_tower.pt",
+    "output_embedding_dim": 128,
+    "clearml_task_id": "task-xyz",
+}
+
+
+def _write_manifest(tmp_path, manifest=None) -> str:
+    import json
+    path = tmp_path / "two_tower_serving_manifest.json"
+    path.write_text(json.dumps(manifest or SAMPLE_MANIFEST))
+    return str(path)
+
+
+def test_init_registry_fails_without_manifest_uri(tmp_path):
+    app = _load_app_module("inference_service_no_manifest_tests")
+    os.environ.pop("GE_INFERENCE_MANIFEST_URI", None)
+    os.environ["GE_INFERENCE_MODELS"] = "post-tower"
+
+    app._models_initialized = False
+    app._init_registry()
+
+    assert app._models_init_error is not None
+    assert "GE_INFERENCE_MANIFEST_URI" in app._models_init_error
+
+
+def test_init_registry_sets_model_uuid_from_manifest(tmp_path):
+    app = _load_app_module("inference_service_manifest_uuid_tests")
+    os.environ["GE_INFERENCE_MANIFEST_URI"] = _write_manifest(tmp_path)
+    os.environ["GE_INFERENCE_MODELS"] = "post-tower,user-tower"
+
+    app._models_initialized = False
+    app._init_registry()
+
+    assert app._models_init_error is None
+    assert app._models["post-tower"].model_uuid == "post-model-abc123"
+    assert app._models["user-tower"].model_uuid == "user-model-def456"
+
+
+def test_init_registry_sets_configured_model_uri_from_manifest(tmp_path):
+    app = _load_app_module("inference_service_manifest_uri_tests")
+    os.environ["GE_INFERENCE_MANIFEST_URI"] = _write_manifest(tmp_path)
+    os.environ["GE_INFERENCE_MODELS"] = "post-tower"
+
+    app._models_initialized = False
+    app._init_registry()
+
+    assert app._models_init_error is None
+    assert app._models["post-tower"].configured_model_uri == "gs://fake-bucket/post_tower.pt"
+
+
+def test_init_registry_fails_on_missing_manifest_keys(tmp_path):
+    import json
+    bad_manifest = {"post_tower_clearml_model_id": "abc"}  # missing post_tower_uri etc.
+    path = tmp_path / "bad_manifest.json"
+    path.write_text(json.dumps(bad_manifest))
+
+    app = _load_app_module("inference_service_manifest_bad_key_tests")
+    os.environ["GE_INFERENCE_MANIFEST_URI"] = str(path)
+    os.environ["GE_INFERENCE_MODELS"] = "post-tower"
+
+    app._models_initialized = False
+    app._init_registry()
+
+    assert app._models_init_error is not None
+
+
+def test_ready_response_includes_model_uuid(monkeypatch):
+    app = _load_app_module("inference_service_ready_uuid_tests")
+
+    entry = app.LoadedModel(model_type="post-tower", model_uuid="post-model-abc123")
+    entry.module = object()
+    entry.device = app.torch.device("cpu")
+    monkeypatch.setattr(app, "_models", {"post-tower": entry})
+    monkeypatch.setattr(app, "_models_initialized", True)
+    monkeypatch.setattr(app, "_models_init_error", None)
+    monkeypatch.setattr(app, "ensure_models_loaded", lambda: None)
+    monkeypatch.setattr(app, "_author_idx_by_did", {})
+    monkeypatch.setattr(app, "_author_idx_map_load_error", None)
+
+    response = app.ready()
+    models_in_response = response.body if hasattr(response, "body") else None
+    # Parse JSON body from JSONResponse
+    import json
+    body = json.loads(response.body)
+    assert body["models"][0]["model_uuid"] == "post-model-abc123"
+
+
+def test_predict_response_includes_model_uuid(app_request, monkeypatch):
+    def post_model(post_embeddings, author_indices):
+        return app_request.torch.Tensor([[2.0, 3.0]])
+
+    monkeypatch.setattr(app_request, "_author_idx_by_did", {})
+
+    entry = app_request.LoadedModel(model_type="post-tower", model_uuid="post-model-abc123")
+    entry.module = post_model
+    entry.device = app_request.torch.device("cpu")
+
+    monkeypatch.setattr(app_request, "_models_initialized", True)
+    monkeypatch.setattr(app_request, "_models_init_error", None)
+    monkeypatch.setattr(app_request, "_models", {"post-tower": entry})
+    monkeypatch.setattr(app_request, "ensure_models_loaded", lambda: None)
+
+    result = app_request.predict_model(
+        "post-tower",
+        req=app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0]),
+    )
+
+    assert result["model_uuid"] == "post-model-abc123"
+    assert result["model_type"] == "post-tower"
