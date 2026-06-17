@@ -8,8 +8,10 @@ two-tower retrieval models:
 - `user-tower`: scores a user's embedding-history sequence
 - `post-tower`: scores one or more post embedding vectors
 
-The service can load models from a local file path, a `gs://...` GCS URI, or a
-ClearML model ID.
+The service loads models based on a `two_tower_serving_manifest.json` file that
+is produced by the engagement-prediction training pipeline and uploaded to GCS.
+The manifest contains the GCS URI and ClearML model ID for each tower, as well
+as the output embedding dimension.
 
 ## Contributing
 
@@ -95,7 +97,7 @@ source .env.example
 At minimum you should set:
 
 - `GE_INFERENCE_MODELS`
-- one source per configured model, such as `GE_INFERENCE_USER_TOWER_MODEL_URI`
+- `GE_INFERENCE_MANIFEST_URI` — GCS URI or local path to `two_tower_serving_manifest.json`
 - `GE_INFERENCE_MAX_HISTORY_LEN`
 - `GE_INFERENCE_API_KEY` if you want to call protected endpoints locally
 
@@ -254,8 +256,7 @@ Deploy to Cloud Run:
 # staging (default)
 ./scripts/deploy.sh \
   --models user-tower,post-tower \
-  --user-tower-model-uri gs://my-bucket/user_tower.pt \
-  --post-tower-model-uri gs://my-bucket/post_tower.pt \
+  --manifest-uri gs://greenearth-471522-engagement-prediction-model-stage/.../two_tower_serving_manifest.json \
   --author-map-uri gs://my-bucket/author_idx.parquet \
   --max-history-len 128
 ```
@@ -265,24 +266,16 @@ Or with environment variables:
 ```bash
 GE_ENVIRONMENT=prod \
 GE_INFERENCE_MODELS=user-tower,post-tower \
-GE_INFERENCE_USER_TOWER_MODEL_URI=gs://my-bucket/user_tower.pt \
-GE_INFERENCE_POST_TOWER_MODEL_URI=gs://my-bucket/post_tower.pt \
+GE_INFERENCE_MANIFEST_URI=gs://greenearth-471522-engagement-prediction-model-prod/.../two_tower_serving_manifest.json \
 GE_INFERENCE_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet \
 GE_INFERENCE_MAX_HISTORY_LEN=128 \
 ./scripts/deploy.sh
 ```
 
-Each configured model must provide one source:
-
-- `GE_INFERENCE_<MODEL>_MODEL_PATH`
-- `GE_INFERENCE_<MODEL>_MODEL_URI`
-- `GE_INFERENCE_<MODEL>_CLEARML_MODEL_ID`
-
-For example, `user-tower` may use one of:
-
-- `GE_INFERENCE_USER_TOWER_MODEL_PATH`
-- `GE_INFERENCE_USER_TOWER_MODEL_URI`
-- `GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID`
+The manifest (`two_tower_serving_manifest.json`) is produced by the
+engagement-prediction training pipeline and uploaded to the model bucket. It
+contains the GCS URIs and ClearML model IDs for both towers. `GE_INFERENCE_MODELS`
+still controls which towers are actually loaded.
 
 During deploy, the script will:
 
@@ -312,11 +305,8 @@ Common deployment configuration:
 Inference configuration:
 
 - `GE_INFERENCE_MODELS`: comma-separated model list, currently `user-tower` and/or `post-tower`
+- `GE_INFERENCE_MANIFEST_URI`: GCS URI or local path to `two_tower_serving_manifest.json` (required); contains model artifact URIs, ClearML model IDs, and output embedding dimension for both towers
 - `GE_INFERENCE_MAX_HISTORY_LEN`: required max history length for user-tower inputs
-- `GE_INFERENCE_USER_TOWER_MODEL_URI`: GCS URI for the user-tower model
-- `GE_INFERENCE_POST_TOWER_MODEL_URI`: GCS URI for the post-tower model
-- `GE_INFERENCE_USER_TOWER_CLEARML_MODEL_ID`: ClearML model ID for the user-tower model
-- `GE_INFERENCE_POST_TOWER_CLEARML_MODEL_ID`: ClearML model ID for the post-tower model
 - `GE_INFERENCE_AUTHOR_MAP_URI`: GCS URI or local path for the author idx parquet map
 
 Runtime configuration used by the app:
@@ -326,5 +316,4 @@ Runtime configuration used by the app:
 - `GE_INFERENCE_PREFER_CUDA`: choose CUDA when available
 - `GE_INFERENCE_WARMUP`: whether to run warmup on startup
 - `GE_INFERENCE_EMBED_DIM`: optional embedding dimension check
-- `GE_INFERENCE_AUTHOR_MAP_URI`: GCS URI or local path for the author idx parquet map
 - `GE_INFERENCE_MODEL_CACHE_DIR`: local cache dir for downloaded `gs://` models
