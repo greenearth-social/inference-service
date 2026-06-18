@@ -47,21 +47,21 @@ GE_INFERENCE_PREFER_CUDA = os.getenv("GE_INFERENCE_PREFER_CUDA", "1") == "1"
 GE_INFERENCE_WARMUP = os.getenv("GE_INFERENCE_WARMUP", "1") == "1"
 _API_KEY: str | None = os.environ.get("GE_INFERENCE_API_KEY") or None
 
-GE_INFERENCE_EMBED_DIM = int(os.getenv("GE_INFERENCE_EMBED_DIM", "0"))
-if GE_INFERENCE_EMBED_DIM <= 0:
-    raise ValueError("Must supply a valid (positive) GE_INFERENCE_EMBED_DIM!")
+GE_INFERENCE_CONTENT_EMBED_DIM = int(os.getenv("GE_INFERENCE_CONTENT_EMBED_DIM", "0"))
+if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
+    raise ValueError("Must supply a valid (positive) GE_INFERENCE_CONTENT_EMBED_DIM!")
 
-GE_INFERENCE_MAX_HISTORY_LEN = int(os.getenv("GE_INFERENCE_MAX_HISTORY_LEN", "0")) 
-if GE_INFERENCE_MAX_HISTORY_LEN <= 0:
-    raise ValueError("Must supply a valid (positive) GE_INFERENCE_MAX_HISTORY_LEN!")
+GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN = int(os.getenv("GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN", "0")) 
+if GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN <= 0:
+    raise ValueError("Must supply a valid (positive) GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN!")
 
 GE_INFERENCE_MAX_BATCH: int | None = int(os.getenv("GE_INFERENCE_MAX_BATCH", "0"))
 if GE_INFERENCE_MAX_BATCH == 0:
     GE_INFERENCE_MAX_BATCH = None
 
-GE_INFERENCE_AUTHOR_MAP_URI: str = os.getenv("GE_INFERENCE_AUTHOR_MAP_URI", "")
-if GE_INFERENCE_AUTHOR_MAP_URI == "":
-    raise ValueError("Must supply a valid GE_INFERENCE_AUTHOR_MAP_URI!")
+GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI: str = os.getenv("GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI", "")
+if GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI == "":
+    raise ValueError("Must supply a valid GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI!")
 
 DTYPE_FLOAT = torch.float32
 
@@ -97,11 +97,11 @@ _models_initialized = False
 _models_init_error: str | None = None
 _models: dict[str, LoadedModel] = {}
 
-_author_idx_by_did: dict[str, int] | None = None
-_author_idx_map_load_error: str | None = None
-_author_idx_map_load_started_at: float | None = None
-_author_idx_map_load_finished_at: float | None = None
-_author_idx_map_resolved_path: str | None = None
+_two_tower_author_idx_by_did: dict[str, int] | None = None
+_two_tower_author_idx_map_load_error: str | None = None
+_two_tower_author_idx_map_load_started_at: float | None = None
+_two_tower_author_idx_map_load_finished_at: float | None = None
+_two_tower_author_idx_map_resolved_path: str | None = None
 
 
 # -------------------------
@@ -113,9 +113,9 @@ def _validate_single_user_history(user_history: list[list[float]]) -> int:
     first_len = len(user_history[0])
     if first_len == 0:
         raise ValueError("embedding dimension must be greater than 0")
-    if GE_INFERENCE_EMBED_DIM:
-        if not all(len(history_post) == GE_INFERENCE_EMBED_DIM for history_post in user_history):
-            raise ValueError(f"embedding dim must be {GE_INFERENCE_EMBED_DIM} for all history embeddings")
+    if GE_INFERENCE_CONTENT_EMBED_DIM:
+        if not all(len(history_post) == GE_INFERENCE_CONTENT_EMBED_DIM for history_post in user_history):
+            raise ValueError(f"embedding dim must be {GE_INFERENCE_CONTENT_EMBED_DIM} for all history embeddings")
     else:
         if not all(len(history_post) == first_len for history_post in user_history):
             raise ValueError(f"all history embeddings must have the same dimension as one another")
@@ -191,7 +191,7 @@ class UserTowerPredictRequest(BaseModel):
 class PostTowerPredictRequest(BaseModel):
     # post_embeddings: [D] or [B, D]
     post_embeddings: list[float] | list[list[float]]
-    target_author_dids: str | list[str] | None = None
+    candidate_author_dids: str | list[str] | None = None
 
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "PostTowerPredictRequest":
@@ -199,7 +199,7 @@ class PostTowerPredictRequest(BaseModel):
         if not isinstance(pe, list) or len(pe) == 0:
             raise ValueError("'post_embeddings' must be a non-empty list")
 
-        author_dids = self.target_author_dids
+        author_dids = self.candidate_author_dids
 
         is_batched = isinstance(pe[0], list)
         if is_batched:
@@ -211,8 +211,8 @@ class PostTowerPredictRequest(BaseModel):
                 raise ValueError("each post_embeddings vector must be non-empty")
             if not all(isinstance(v, list) and len(v) == d0 for v in batch):
                 raise ValueError("all post_embeddings vectors must have the same length")
-            if GE_INFERENCE_EMBED_DIM and d0 != GE_INFERENCE_EMBED_DIM:
-                raise ValueError(f"expected D={GE_INFERENCE_EMBED_DIM}, got D={d0}")
+            if GE_INFERENCE_CONTENT_EMBED_DIM and d0 != GE_INFERENCE_CONTENT_EMBED_DIM:
+                raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={d0}")
             if author_dids is None:
                 return self
             if not isinstance(author_dids, list) or len(author_dids) != len(batch):
@@ -221,8 +221,8 @@ class PostTowerPredictRequest(BaseModel):
             vec = pe  # type: ignore[assignment]
             if len(vec) == 0:
                 raise ValueError("'post_embeddings' must be non-empty")
-            if GE_INFERENCE_EMBED_DIM and len(vec) != GE_INFERENCE_EMBED_DIM:
-                raise ValueError(f"expected D={GE_INFERENCE_EMBED_DIM}, got D={len(vec)}")
+            if GE_INFERENCE_CONTENT_EMBED_DIM and len(vec) != GE_INFERENCE_CONTENT_EMBED_DIM:
+                raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={len(vec)}")
             if author_dids is None:
                 return self
             if not isinstance(author_dids, str):
@@ -345,37 +345,37 @@ def _load_author_idx_map_from_parquet(path: str) -> dict[str, int]:
     return author_idx_by_did
 
 
-def ensure_author_idx_map_loaded() -> None:
-    global _author_idx_by_did, _author_idx_map_load_error
-    global _author_idx_map_load_started_at, _author_idx_map_load_finished_at, _author_idx_map_resolved_path
+def _ensure_two_tower_author_idx_map_loaded() -> None:
+    global _two_tower_author_idx_by_did, _two_tower_author_idx_map_load_error
+    global _two_tower_author_idx_map_load_started_at, _two_tower_author_idx_map_load_finished_at, _two_tower_author_idx_map_resolved_path
 
-    if _author_idx_by_did is not None:
+    if _two_tower_author_idx_by_did is not None:
         return
 
     with _models_lock:
-        if _author_idx_by_did is not None:
+        if _two_tower_author_idx_by_did is not None:
             return
-        if _author_idx_map_load_started_at is not None and _author_idx_map_load_finished_at is None:
+        if _two_tower_author_idx_map_load_started_at is not None and _two_tower_author_idx_map_load_finished_at is None:
             return
 
-        _author_idx_map_load_started_at = time.time()
+        _two_tower_author_idx_map_load_started_at = time.time()
         try:
-            resolved_path = _resolve_author_idx_map_file(GE_INFERENCE_AUTHOR_MAP_URI)
-            _author_idx_by_did = _load_author_idx_map_from_parquet(resolved_path)
-            _author_idx_map_resolved_path = resolved_path
-            _author_idx_map_load_error = None
+            resolved_path = _resolve_author_idx_map_file(GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI)
+            _two_tower_author_idx_by_did = _load_author_idx_map_from_parquet(resolved_path)
+            _two_tower_author_idx_map_resolved_path = resolved_path
+            _two_tower_author_idx_map_load_error = None
             logger.info(
                 "Author idx map loaded | source=%s | path=%s | entries=%s",
-                GE_INFERENCE_AUTHOR_MAP_URI,
+                GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
                 resolved_path,
-                len(_author_idx_by_did),
+                len(_two_tower_author_idx_by_did),
             )
         except Exception as e:
-            _author_idx_by_did = None
-            _author_idx_map_load_error = str(e)
-            logger.exception("Author idx map load failed | source=%s | error=%s", GE_INFERENCE_AUTHOR_MAP_URI, e)
+            _two_tower_author_idx_by_did = None
+            _two_tower_author_idx_map_load_error = str(e)
+            logger.exception("Author idx map load failed | source=%s | error=%s", GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI, e)
         finally:
-            _author_idx_map_load_finished_at = time.time()
+            _two_tower_author_idx_map_load_finished_at = time.time()
 
 
 def _validate_model_type(model_type: str) -> ModelType:
@@ -400,11 +400,6 @@ def _model_env_key(model_type: str) -> str:
     # Model names may contain "-" which isn't valid in env vars.
     # Example: "user-tower" -> "USER_TOWER"
     return "".join((c if c.isalnum() else "_") for c in model_type).upper()
-
-
-def _read_model_env(model_type: str, suffix: str) -> str | None:
-    key = _model_env_key(model_type)
-    return os.getenv(f"GE_INFERENCE_{key}_{suffix}")
 
 
 def _to_python(obj: Any) -> Any:
@@ -440,22 +435,22 @@ def _warmup_entry(entry: LoadedModel) -> None:
     with torch.inference_mode():
         # Keep warmup short.
         if entry.model_type == "post-tower":
-            if GE_INFERENCE_EMBED_DIM <= 0:
+            if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
                 return
-            dummy_embedding = torch.zeros((1, GE_INFERENCE_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
-            dummy_author_idx = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
-            _ = model(dummy_embedding, dummy_author_idx)
+            post_embeddings = torch.zeros((1, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
+            candidate_author_indices = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
+            _ = model(post_embeddings, candidate_author_indices)
             return
 
         if entry.model_type == "user-tower":
-            if GE_INFERENCE_EMBED_DIM <= 0:
+            if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
                 return
             history_embeddings = torch.zeros(
-                (1, GE_INFERENCE_MAX_HISTORY_LEN, GE_INFERENCE_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
+                (1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
             )
-            history_mask = torch.ones((1, GE_INFERENCE_MAX_HISTORY_LEN), dtype=torch.bool, device=device)
-            author_indices = torch.tensor([[AUTHOR_PAD_IDX] * GE_INFERENCE_MAX_HISTORY_LEN], dtype=torch.int64, device=device)
-            _ = model(history_embeddings, history_mask, author_indices)
+            history_mask = torch.ones((1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN), dtype=torch.bool, device=device)
+            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN], dtype=torch.int64, device=device)
+            _ = model(history_embeddings, history_mask, history_author_indices)
             return
 
 
@@ -569,7 +564,7 @@ def _load_entry(entry: LoadedModel) -> None:
 def ensure_models_loaded() -> None:
     """Concurrency-safe, idempotent load of all configured models."""
     _init_registry()
-    ensure_author_idx_map_loaded()
+    _ensure_two_tower_author_idx_map_loaded()
     if _models_init_error is not None:
         logger.error("Model registry init failed: %s", _models_init_error)
         return
@@ -624,17 +619,17 @@ def _get_author_indices_from_dids(
     author_dids: str | list[str] | list[list[str]],
 ) -> list[int] | list[list[int]]:
     if isinstance(author_dids, str):
-        if _author_idx_by_did is None:
+        if _two_tower_author_idx_by_did is None:
             raise HTTPException(status_code=503, detail="Author idx map not loaded")
-        return [_get_single_author_idx_from_did(author_dids, _author_idx_by_did)]
+        return [_get_single_author_idx_from_did(author_dids, _two_tower_author_idx_by_did)]
     elif isinstance(author_dids, list):
         if len(author_dids) == 0:
             return []
-        if _author_idx_by_did is None:
+        if _two_tower_author_idx_by_did is None:
             raise HTTPException(status_code=503, detail="Author idx map not loaded")
         elif isinstance(author_dids[0], str):
             return [
-                _get_single_author_idx_from_did(did, _author_idx_by_did) # type: ignore
+                _get_single_author_idx_from_did(did, _two_tower_author_idx_by_did) # type: ignore
                 for did in author_dids
             ]
         else: 
@@ -642,7 +637,7 @@ def _get_author_indices_from_dids(
                 raise HTTPException(status_code=422, detail="author dids must either be a string, a list of strings, or a list of list of strings")
             return [
                 [
-                    _get_single_author_idx_from_did(did, _author_idx_by_did)
+                    _get_single_author_idx_from_did(did, _two_tower_author_idx_by_did)
                     for did in author_did_list
                 ] 
                 for author_did_list in author_dids
@@ -652,8 +647,8 @@ def _get_author_indices_from_dids(
 def _get_target_author_indices_for_request(
     req: PostTowerPredictRequest,
 ) -> list[int] | list[list[int]]:
-    if req.target_author_dids is not None:
-        return _get_author_indices_from_dids(req.target_author_dids)
+    if req.candidate_author_dids is not None:
+        return _get_author_indices_from_dids(req.candidate_author_dids)
     if isinstance(req.post_embeddings[0], list):
         return [AUTHOR_UNK_IDX] * len(req.post_embeddings)
     return [AUTHOR_UNK_IDX]
@@ -681,8 +676,8 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 # take raw list inputs and pad/truncate:
                 history_embeddings_padded, history_mask_padded, author_indices_padded = get_padded_embedding_history_and_mask_batched(
                     history_embeddings=req.history_embeddings,
-                    max_history_len=GE_INFERENCE_MAX_HISTORY_LEN,
-                    embed_dim=GE_INFERENCE_EMBED_DIM,
+                    max_history_len=GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
+                    embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
                     author_indices=author_indices_list,
                 )
                 history_embeddings = _tensor_from_nested_list("history_embeddings", history_embeddings_padded, DTYPE_FLOAT, entry.device)
@@ -728,7 +723,7 @@ def ready():
 
     models_payload: list[dict[str, Any]] = []
     all_ready = _models_init_error is None and len(_models) > 0
-    author_idx_map_ready = _author_idx_by_did is not None and _author_idx_map_load_error is None
+    author_idx_map_ready = _two_tower_author_idx_by_did is not None and _two_tower_author_idx_map_load_error is None
     all_ready = all_ready and author_idx_map_ready
     for entry in _models.values():
         model_ready = entry.module is not None and entry.device is not None and entry.load_error is None
@@ -750,16 +745,16 @@ def ready():
     payload = {
         "ready": all_ready,
         "registry_error": _models_init_error,
-        "embed_dim": GE_INFERENCE_EMBED_DIM if GE_INFERENCE_EMBED_DIM > 0 else None,
-        "max_seq_len": GE_INFERENCE_MAX_HISTORY_LEN,
+        "embed_dim": GE_INFERENCE_CONTENT_EMBED_DIM if GE_INFERENCE_CONTENT_EMBED_DIM > 0 else None,
+        "max_seq_len": GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
         "author_idx_map": {
             "ready": author_idx_map_ready,
-            "uri": GE_INFERENCE_AUTHOR_MAP_URI,
-            "resolved_path": _author_idx_map_resolved_path,
-            "num_entries": len(_author_idx_by_did) if _author_idx_by_did is not None else None,
-            "load_error": _author_idx_map_load_error,
-            "load_started_at": _format_timestamp(_author_idx_map_load_started_at),
-            "load_finished_at": _format_timestamp(_author_idx_map_load_finished_at),
+            "uri": GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
+            "resolved_path": _two_tower_author_idx_map_resolved_path,
+            "num_entries": len(_two_tower_author_idx_by_did) if _two_tower_author_idx_by_did is not None else None,
+            "load_error": _two_tower_author_idx_map_load_error,
+            "load_started_at": _format_timestamp(_two_tower_author_idx_map_load_started_at),
+            "load_finished_at": _format_timestamp(_two_tower_author_idx_map_load_finished_at),
         },
         "models": models_payload,
     }
@@ -788,14 +783,14 @@ def list_models() -> dict:
     return {
         "models": models_payload,
         "registry_error": _models_init_error,
-        "author_idx_map": {
-            "ready": _author_idx_by_did is not None and _author_idx_map_load_error is None,
-            "uri": GE_INFERENCE_AUTHOR_MAP_URI,
-            "resolved_path": _author_idx_map_resolved_path,
-            "num_entries": len(_author_idx_by_did) if _author_idx_by_did is not None else None,
-            "load_error": _author_idx_map_load_error,
-            "load_started_at": _format_timestamp(_author_idx_map_load_started_at),
-            "load_finished_at": _format_timestamp(_author_idx_map_load_finished_at),
+        "two_tower_author_idx_map": {
+            "ready": _two_tower_author_idx_by_did is not None and _two_tower_author_idx_map_load_error is None,
+            "uri": GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
+            "resolved_path": _two_tower_author_idx_map_resolved_path,
+            "num_entries": len(_two_tower_author_idx_by_did) if _two_tower_author_idx_by_did is not None else None,
+            "load_error": _two_tower_author_idx_map_load_error,
+            "load_started_at": _format_timestamp(_two_tower_author_idx_map_load_started_at),
+            "load_finished_at": _format_timestamp(_two_tower_author_idx_map_load_finished_at),
         },
     }
 
