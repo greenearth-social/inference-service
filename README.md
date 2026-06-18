@@ -97,8 +97,8 @@ source .env.example
 At minimum you should set:
 
 - `GE_INFERENCE_MODELS`
-- `GE_INFERENCE_MANIFEST_URI` — GCS URI or local path to `two_tower_serving_manifest.json`
-- `GE_INFERENCE_MAX_HISTORY_LEN`
+- `GE_INFERENCE_TWO_TOWER_MANIFEST_URI` — GCS URI or local path to `two_tower_serving_manifest.json`
+- `GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN`
 - `GE_INFERENCE_API_KEY` if you want to call protected endpoints locally
 
 Then start the server:
@@ -256,9 +256,9 @@ Deploy to Cloud Run:
 # staging (default)
 ./scripts/deploy.sh \
   --models user-tower,post-tower \
-  --manifest-uri gs://greenearth-471522-engagement-prediction-model-stage/.../two_tower_serving_manifest.json \
-  --author-map-uri gs://my-bucket/author_idx.parquet \
-  --max-history-len 128
+  --two-tower-manifest-uri gs://greenearth-471522-engagement-prediction-model-stage/.../two_tower_serving_manifest.json \
+  --two-tower-author-map-uri gs://my-bucket/author_idx.parquet \
+  --two-tower-max-history-len 128
 ```
 
 Or with environment variables:
@@ -266,9 +266,9 @@ Or with environment variables:
 ```bash
 GE_ENVIRONMENT=prod \
 GE_INFERENCE_MODELS=user-tower,post-tower \
-GE_INFERENCE_MANIFEST_URI=gs://greenearth-471522-engagement-prediction-model-prod/.../two_tower_serving_manifest.json \
-GE_INFERENCE_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet \
-GE_INFERENCE_MAX_HISTORY_LEN=128 \
+GE_INFERENCE_TWO_TOWER_MANIFEST_URI=gs://greenearth-471522-engagement-prediction-model-prod/.../two_tower_serving_manifest.json \
+GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet \
+GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN=128 \
 ./scripts/deploy.sh
 ```
 
@@ -305,9 +305,9 @@ Common deployment configuration:
 Inference configuration:
 
 - `GE_INFERENCE_MODELS`: comma-separated model list, currently `user-tower` and/or `post-tower`
-- `GE_INFERENCE_MANIFEST_URI`: GCS URI or local path to `two_tower_serving_manifest.json` (required); contains model artifact URIs, ClearML model IDs, and output embedding dimension for both towers
-- `GE_INFERENCE_MAX_HISTORY_LEN`: required max history length for user-tower inputs
-- `GE_INFERENCE_AUTHOR_MAP_URI`: GCS URI or local path for the author idx parquet map
+- `GE_INFERENCE_TWO_TOWER_MANIFEST_URI`: GCS URI or local path to `two_tower_serving_manifest.json` (required); contains model artifact URIs, ClearML model IDs, and output embedding dimension for both towers
+- `GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN`: required max history length for user-tower inputs
+- `GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI`: GCS URI or local path for the author idx parquet map
 
 Runtime configuration used by the app:
 
@@ -315,5 +315,5 @@ Runtime configuration used by the app:
 - `GE_INFERENCE_MAX_BATCH`: maximum allowed batch size
 - `GE_INFERENCE_PREFER_CUDA`: choose CUDA when available
 - `GE_INFERENCE_WARMUP`: whether to run warmup on startup
-- `GE_INFERENCE_EMBED_DIM`: optional embedding dimension check
+- `GE_INFERENCE_CONTENT_EMBED_DIM`: input content embedding dimension
 - `GE_INFERENCE_MODEL_CACHE_DIR`: local cache dir for downloaded `gs://` models

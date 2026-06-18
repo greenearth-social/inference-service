@@ -20,10 +20,10 @@ GE_INFERENCE_MAX_INSTANCES="${GE_INFERENCE_MAX_INSTANCES:-1}"
 
 # Multi-model config — required, no defaults
 GE_INFERENCE_MODELS="${GE_INFERENCE_MODELS:-}"
-GE_INFERENCE_MANIFEST_URI="${GE_INFERENCE_MANIFEST_URI:-}"
-GE_INFERENCE_AUTHOR_MAP_URI="${GE_INFERENCE_AUTHOR_MAP_URI:-}"
-GE_INFERENCE_MAX_HISTORY_LEN="${GE_INFERENCE_MAX_HISTORY_LEN:-128}"
-GE_INFERENCE_EMBED_DIM="${GE_INFERENCE_EMBED_DIM:-384}"
+GE_INFERENCE_TWO_TOWER_MANIFEST_URI="${GE_INFERENCE_TWO_TOWER_MANIFEST_URI:-}"
+GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI="${GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI:-}"
+GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN="${GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN:-128}"
+GE_INFERENCE_CONTENT_EMBED_DIM="${GE_INFERENCE_CONTENT_EMBED_DIM:-384}"
 GE_INFERENCE_MAX_BATCH="${GE_INFERENCE_MAX_BATCH:-0}"
 
 # Colors for output
@@ -120,27 +120,27 @@ validate_config() {
         exit 1
     fi
 
-    if [ -z "$GE_INFERENCE_MAX_HISTORY_LEN" ] || ! [[ "$GE_INFERENCE_MAX_HISTORY_LEN" =~ ^[1-9][0-9]*$ ]]; then
-        log_error "GE_INFERENCE_MAX_HISTORY_LEN is required and must be a positive integer."
-        log_error "Example: GE_INFERENCE_MAX_HISTORY_LEN=128 ./deploy.sh"
+    if [ -z "$GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN" ] || ! [[ "$GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN is required and must be a positive integer."
+        log_error "Example: GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN=128 ./deploy.sh"
         exit 1
     fi
 
-    if [ -z "$GE_INFERENCE_EMBED_DIM" ] || ! [[ "$GE_INFERENCE_EMBED_DIM" =~ ^[1-9][0-9]*$ ]]; then
-        log_error "GE_INFERENCE_EMBED_DIM is required and must be a positive integer."
-        log_error "Example: GE_INFERENCE_EMBED_DIM=384 ./deploy.sh"
+    if [ -z "$GE_INFERENCE_CONTENT_EMBED_DIM" ] || ! [[ "$GE_INFERENCE_CONTENT_EMBED_DIM" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "GE_INFERENCE_CONTENT_EMBED_DIM is required and must be a positive integer."
+        log_error "Example: GE_INFERENCE_CONTENT_EMBED_DIM=384 ./deploy.sh"
         exit 1
     fi
 
-    if [ -z "$GE_INFERENCE_MANIFEST_URI" ]; then
-        log_error "GE_INFERENCE_MANIFEST_URI is required."
-        log_error "Example: GE_INFERENCE_MANIFEST_URI=gs://my-bucket/.../two_tower_serving_manifest.json ./deploy.sh"
+    if [ -z "$GE_INFERENCE_TWO_TOWER_MANIFEST_URI" ]; then
+        log_error "GE_INFERENCE_TWO_TOWER_MANIFEST_URI is required."
+        log_error "Example: GE_INFERENCE_TWO_TOWER_MANIFEST_URI=gs://my-bucket/.../two_tower_serving_manifest.json ./deploy.sh"
         exit 1
     fi
 
-    if [ -z "$GE_INFERENCE_AUTHOR_MAP_URI" ]; then
-        log_error "GE_INFERENCE_AUTHOR_MAP_URI is required."
-        log_error "Example: GE_INFERENCE_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet ./deploy.sh"
+    if [ -z "$GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI" ]; then
+        log_error "GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI is required."
+        log_error "Example: GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet ./deploy.sh"
         exit 1
     fi
 
@@ -255,11 +255,11 @@ deploy_inference_service() {
     trap "rm -rf $temp_var_dir" EXIT
     cat > "$temp_var_dir/env-vars.yaml" <<EOF
 GE_INFERENCE_MODELS: "$GE_INFERENCE_MODELS"
-GE_INFERENCE_MANIFEST_URI: "$GE_INFERENCE_MANIFEST_URI"
-GE_INFERENCE_MAX_HISTORY_LEN: "$GE_INFERENCE_MAX_HISTORY_LEN"
-GE_INFERENCE_EMBED_DIM: "$GE_INFERENCE_EMBED_DIM"
+GE_INFERENCE_TWO_TOWER_MANIFEST_URI: "$GE_INFERENCE_TWO_TOWER_MANIFEST_URI"
+GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN: "$GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"
+GE_INFERENCE_CONTENT_EMBED_DIM: "$GE_INFERENCE_CONTENT_EMBED_DIM"
 GE_INFERENCE_MAX_BATCH: "$GE_INFERENCE_MAX_BATCH"
-GE_INFERENCE_AUTHOR_MAP_URI: "$GE_INFERENCE_AUTHOR_MAP_URI"
+GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI: "$GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"
 GE_INFERENCE_PREFER_CUDA: "0"
 GE_INFERENCE_WARMUP: "0"
 EOF
@@ -301,9 +301,9 @@ main() {
     log_info "Region:          $GE_GCP_REGION"
     log_info "Environment:     $GE_ENVIRONMENT"
     log_info "Models:          $GE_INFERENCE_MODELS"
-    log_info "Manifest URI:    $GE_INFERENCE_MANIFEST_URI"
-    log_info "Max history len: $GE_INFERENCE_MAX_HISTORY_LEN"
-    log_info "Embed dimension: $GE_INFERENCE_EMBED_DIM"
+    log_info "Manifest URI:    $GE_INFERENCE_TWO_TOWER_MANIFEST_URI"
+    log_info "Max history len: $GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"
+    log_info "Embed dimension: $GE_INFERENCE_CONTENT_EMBED_DIM"
     log_info "Max batch:       $GE_INFERENCE_MAX_BATCH"
 
     validate_config
@@ -334,20 +334,20 @@ while [[ $# -gt 0 ]]; do
             GE_INFERENCE_MODELS="$2"
             shift 2
             ;;
-        --manifest-uri)
-            GE_INFERENCE_MANIFEST_URI="$2"
+        --two-tower-manifest-uri)
+            GE_INFERENCE_TWO_TOWER_MANIFEST_URI="$2"
             shift 2
             ;;
-        --author-map-uri)
-            GE_INFERENCE_AUTHOR_MAP_URI="$2"
+        --two-tower-author-map-uri)
+            GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI="$2"
             shift 2
             ;;
-        --max-history-len)
-            GE_INFERENCE_MAX_HISTORY_LEN="$2"
+        --two-tower-max-history-len)
+            GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN="$2"
             shift 2
             ;;
-        --embed-dim)
-            GE_INFERENCE_EMBED_DIM="$2"
+        --content-embed-dim)
+            GE_INFERENCE_CONTENT_EMBED_DIM="$2"
             shift 2
             ;;
         --max-batch)
@@ -374,41 +374,43 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --project-id ID          GCP project ID (default: greenearth-471522)"
-            echo "  --region REGION          GCP region (default: us-east1)"
-            echo "  --environment ENV        Environment name (default: stage)"
-            echo "  --models TYPES           Comma-separated model types to load (required)"
-            echo "                           Supported: user-tower, post-tower"
-            echo "  --manifest-uri URI       GCS URI or local path to two_tower_serving_manifest.json (required)"
-            echo "  --author-map-uri URI     GCS URI or local path for the author idx parquet map (required)"
-            echo "  --max-history-len N      Maximum user history sequence length (required)"
-            echo "  --inference-domain DOMAIN  Custom mapped domain for inference service"
-            echo "  --disable-domain-mapping   Skip domain mapping reconciliation"
-            echo "  --min-instances N        Minimum Cloud Run instances (default: 1)"
-            echo "  --max-instances N        Maximum Cloud Run instances (default: 1)"
-            echo "  --help                   Show this help message"
+            echo "  --project-id ID                 GCP project ID (default: greenearth-471522)"
+            echo "  --region REGION                 GCP region (default: us-east1)"
+            echo "  --environment ENV               Environment name (default: stage)"
+            echo "  --models TYPES                  Comma-separated model types to load (required)"
+            echo "                                  Supported: user-tower, post-tower"
+            echo "  --two-tower-manifest-uri URI    GCS URI or local path to two_tower_serving_manifest.json (required)"
+            echo "  --content-embed-dim N           Dimension of the input content embeddings (required)"
+            echo "  --two-tower-author-map-uri URI  GCS URI or local path for the author idx parquet map (required)"
+            echo "  --two-tower-max-history-len N   Maximum user history sequence length (required)"
+            echo "  --max-batch N                   Max batch size allowed for inference"
+            echo "  --inference-domain DOMAIN       Custom mapped domain for inference service"
+            echo "  --disable-domain-mapping        Skip domain mapping reconciliation"
+            echo "  --min-instances N               Minimum Cloud Run instances (default: 1)"
+            echo "  --max-instances N               Maximum Cloud Run instances (default: 1)"
+            echo "  --help                          Show this help message"
             echo ""
             echo "Environment variables:"
-            echo "  GE_GCP_PROJECT_ID                 Same as --project-id"
-            echo "  GE_GCP_REGION                     Same as --region"
-            echo "  GE_ENVIRONMENT                    Same as --environment"
-            echo "  GE_INFERENCE_MODELS               Same as --models (required)"
-            echo "  GE_INFERENCE_MANIFEST_URI         Same as --manifest-uri (required)"
-            echo "  GE_INFERENCE_MAX_HISTORY_LEN      Same as --max-history-len (required)"
-            echo "  GE_INFERENCE_EMBED_DIM            Same as --embed-dim (required)"
-            echo "  GE_INFERENCE_MAX_BATCH            Same as --max-batch (optional; 0 = no limit)"
-            echo "  GE_INFERENCE_AUTHOR_MAP_URI       GCS URI or local path for the author idx parquet map"
-            echo "  GE_ENABLE_INFERENCE_DOMAIN_MAPPING  true/false toggle (default: true)"
-            echo "  GE_INFERENCE_DOMAIN               Custom mapped domain"
-            echo "  GE_INFERENCE_MIN_INSTANCES        Minimum Cloud Run instances (default: 1)"
-            echo "  GE_INFERENCE_MAX_INSTANCES        Maximum Cloud Run instances (default: 1)"
+            echo "  GE_GCP_PROJECT_ID                        Same as --project-id"
+            echo "  GE_GCP_REGION                            Same as --region"
+            echo "  GE_ENVIRONMENT                           Same as --environment"
+            echo "  GE_INFERENCE_MODELS                      Same as --models (required)"
+            echo "  GE_INFERENCE_TWO_TOWER_MANIFEST_URI      Same as --two-tower-manifest-uri (required)"
+            echo "  GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN   Same as --two-tower-max-history-len (required)"
+            echo "  GE_INFERENCE_CONTENT_EMBED_DIM           Same as --content-embed-dim (required)"
+            echo "  GE_INFERENCE_MAX_BATCH                   Same as --max-batch (optional; 0 = no limit)"
+            echo "  GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI    GCS URI or local path for the two tower author idx parquet map"
+            echo "  GE_ENABLE_INFERENCE_DOMAIN_MAPPING       true/false toggle (default: true)"
+            echo "  GE_INFERENCE_DOMAIN                      Custom mapped domain"
+            echo "  GE_INFERENCE_MIN_INSTANCES               Minimum Cloud Run instances (default: 1)"
+            echo "  GE_INFERENCE_MAX_INSTANCES               Maximum Cloud Run instances (default: 1)"
             echo ""
             echo "Examples:"
             echo "  $0 --environment stage \\"
             echo "     --models user-tower,post-tower \\"
-            echo "     --manifest-uri gs://my-bucket/.../two_tower_serving_manifest.json \\"
-            echo "     --author-map-uri gs://my-bucket/author_idx.parquet \\"
-            echo "     --max-history-len 50"
+            echo "     --two-tower-manifest-uri gs://my-bucket/.../two_tower_serving_manifest.json \\"
+            echo "     --two-tower-author-map-uri gs://my-bucket/author_idx.parquet \\"
+            echo "     --two-tower-max-history-len 50"
             exit 0
             ;;
         *)
