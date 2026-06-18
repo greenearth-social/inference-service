@@ -191,7 +191,7 @@ class UserTowerPredictRequest(BaseModel):
 class PostTowerPredictRequest(BaseModel):
     # post_embeddings: [D] or [B, D]
     post_embeddings: list[float] | list[list[float]]
-    candidate_author_dids: str | list[str] | None = None
+    target_author_dids: str | list[str] | None = None
 
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "PostTowerPredictRequest":
@@ -199,7 +199,7 @@ class PostTowerPredictRequest(BaseModel):
         if not isinstance(pe, list) or len(pe) == 0:
             raise ValueError("'post_embeddings' must be a non-empty list")
 
-        author_dids = self.candidate_author_dids
+        author_dids = self.target_author_dids
 
         is_batched = isinstance(pe[0], list)
         if is_batched:
@@ -466,14 +466,14 @@ def _init_registry() -> None:
         try:
             models: dict[str, LoadedModel] = {}
 
-            manifest_uri = os.getenv("GE_INFERENCE_MANIFEST_URI", "").strip()
-            if not manifest_uri:
+            two_tower_manifest_uri = os.getenv("GE_INFERENCE_TWO_TOWER_MANIFEST_URI", "").strip()
+            if not two_tower_manifest_uri:
                 raise RuntimeError(
-                    "GE_INFERENCE_MANIFEST_URI is required — set it to the GCS URI or local path of "
+                    "GE_INFERENCE_TWO_TOWER_MANIFEST_URI is required — set it to the GCS URI or local path of "
                     "the two_tower_serving_manifest.json produced by training."
                 )
 
-            manifest = _load_manifest(manifest_uri)
+            manifest = _load_manifest(two_tower_manifest_uri)
             post_tower_uri = manifest["post_tower_uri"]
             post_tower_uuid = manifest["post_tower_clearml_model_id"]
             user_tower_uri = manifest["user_tower_uri"]
@@ -647,8 +647,8 @@ def _get_author_indices_from_dids(
 def _get_target_author_indices_for_request(
     req: PostTowerPredictRequest,
 ) -> list[int] | list[list[int]]:
-    if req.candidate_author_dids is not None:
-        return _get_author_indices_from_dids(req.candidate_author_dids)
+    if req.target_author_dids is not None:
+        return _get_author_indices_from_dids(req.target_author_dids)
     if isinstance(req.post_embeddings[0], list):
         return [AUTHOR_UNK_IDX] * len(req.post_embeddings)
     return [AUTHOR_UNK_IDX]
@@ -723,8 +723,8 @@ def ready():
 
     models_payload: list[dict[str, Any]] = []
     all_ready = _models_init_error is None and len(_models) > 0
-    author_idx_map_ready = _two_tower_author_idx_by_did is not None and _two_tower_author_idx_map_load_error is None
-    all_ready = all_ready and author_idx_map_ready
+    two_tower_author_idx_map_ready = _two_tower_author_idx_by_did is not None and _two_tower_author_idx_map_load_error is None
+    all_ready = all_ready and two_tower_author_idx_map_ready
     for entry in _models.values():
         model_ready = entry.module is not None and entry.device is not None and entry.load_error is None
         all_ready = all_ready and model_ready
@@ -746,9 +746,9 @@ def ready():
         "ready": all_ready,
         "registry_error": _models_init_error,
         "embed_dim": GE_INFERENCE_CONTENT_EMBED_DIM if GE_INFERENCE_CONTENT_EMBED_DIM > 0 else None,
-        "max_seq_len": GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
-        "author_idx_map": {
-            "ready": author_idx_map_ready,
+        "two_tower_max_seq_len": GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
+        "two_tower_author_idx_map": {
+            "ready": two_tower_author_idx_map_ready,
             "uri": GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
             "resolved_path": _two_tower_author_idx_map_resolved_path,
             "num_entries": len(_two_tower_author_idx_by_did) if _two_tower_author_idx_by_did is not None else None,
