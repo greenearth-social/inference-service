@@ -71,7 +71,7 @@ AUTHOR_UNK_IDX = 1
 # -------------------------
 # State
 # -------------------------
-ModelType = Literal["user-tower", "post-tower"]
+ModelType = Literal["user-tower", "post-tower", "ranker"]
 
 
 @dataclass
@@ -230,8 +230,23 @@ class PostTowerPredictRequest(BaseModel):
         return self
 
 
+class RankerPredictRequest(BaseModel):
+    # history_embeddings: [T, D] or [B, T, D]
+    history_embeddings: list[list[float]] | list[list[list[float]]]
+    history_author_dids: list[str] | list[list[str]] | None = None
+    # candidate_post_embeddings: [D] or [B, D]
+    candidate_post_embeddings: list[float] | list[list[float]]
+    candidate_author_dids: str | list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_post_inputs(self) -> "RankerPredictRequest":
+        return self
+
+
 def _predict_request_discriminator(value: Any) -> str:
     if isinstance(value, dict):
+        if "history_embeddings" in value and "candidate_post_embeddings" in value:
+            return "ranker"
         if "post_embeddings" in value:
             return "post-tower"
         if "history_embeddings" in value:
@@ -240,7 +255,9 @@ def _predict_request_discriminator(value: Any) -> str:
 
 
 PredictRequest = Annotated[
-    Annotated[UserTowerPredictRequest, Tag("user-tower")] | Annotated[PostTowerPredictRequest, Tag("post-tower")],
+    Annotated[UserTowerPredictRequest, Tag("user-tower")] | 
+    Annotated[PostTowerPredictRequest, Tag("post-tower")] |
+    Annotated[RankerPredictRequest, Tag("ranker")],
     Discriminator(_predict_request_discriminator),
 ]
 
@@ -451,6 +468,22 @@ def _warmup_entry(entry: LoadedModel) -> None:
             history_mask = torch.ones((1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN), dtype=torch.bool, device=device)
             history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN], dtype=torch.int64, device=device)
             _ = model(history_embeddings, history_mask, history_author_indices)
+            return
+        
+        if entry.model_type == "ranker":
+            if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
+                return
+            history_embeddings = torch.zeros(
+                (1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
+            )
+            history_mask = torch.ones((1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN), dtype=torch.bool, device=device)
+            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN], dtype=torch.int64, device=device)
+            candidate_post_embeddings = torch.zeros((1, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
+            candidate_author_indices = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
+            _ = model(
+                history_embeddings, history_mask, # HISTORY_TIME_DELTAS_HOURS,
+                candidate_post_embeddings, history_author_indices, candidate_author_indices,
+            )
             return
 
 
