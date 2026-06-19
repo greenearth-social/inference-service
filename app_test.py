@@ -92,6 +92,7 @@ def _load_app_module(
     max_history_len: int = 8,
     author_idx_map_uri: str | None = DEFAULT_AUTHOR_IDX_MAP_URI,
     ranker_author_idx_map_uri: str | None = None,
+    ranker_max_history_len: int | None = 6,
     model_types: str = "post-tower,user-tower",
 ):
     _install_stub_modules()
@@ -99,6 +100,10 @@ def _load_app_module(
     os.environ["GE_INFERENCE_MAX_BATCH"] = str(max_batch)
     os.environ["GE_INFERENCE_CONTENT_EMBED_DIM"] = str(embed_dim)
     os.environ["GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"] = str(max_history_len)
+    if ranker_max_history_len is None:
+        os.environ.pop("GE_INFERENCE_RANKER_MAX_HISTORY_LEN", None)
+    else:
+        os.environ["GE_INFERENCE_RANKER_MAX_HISTORY_LEN"] = str(ranker_max_history_len)
     os.environ["GE_INFERENCE_MODELS"] = model_types
     os.environ.pop("GE_INFERENCE_EMBED_DIM", None)
     os.environ.pop("GE_INFERENCE_MAX_HISTORY_LEN", None)
@@ -510,6 +515,7 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = user_model
     entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 8
 
     req = app_request.UserTowerPredictRequest(
         history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
@@ -518,7 +524,7 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     out = app_request._predict_with_entry(entry, req)
 
     assert captured["pad_args"]["history_embeddings"] == [[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]]
-    assert captured["pad_args"]["max_history_len"] == app_request.GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN
+    assert captured["pad_args"]["max_history_len"] == entry.max_history_len
     assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_CONTENT_EMBED_DIM
     assert captured["pad_args"]["author_indices"] == [7, 8]
     assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
@@ -541,6 +547,7 @@ def test_predict_with_entry_user_tower_uses_real_padding_for_author_indices(app_
     entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = user_model
     entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 8
 
     req = app_request.UserTowerPredictRequest(
         history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
@@ -579,6 +586,7 @@ def test_predict_with_entry_user_tower_defaults_missing_author_dids_to_unknown(a
     entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = user_model
     entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 8
 
     req = app_request.UserTowerPredictRequest(
         history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
@@ -788,6 +796,7 @@ def test_ready_response_reports_ranker_author_idx_map(monkeypatch):
     entry = app.LoadedModel(model_type="ranker", model_uuid="ranker-model-abc123")
     entry.module = object()
     entry.device = app.torch.device("cpu")
+    entry.max_history_len = 6
     monkeypatch.setattr(app, "_models", {"ranker": entry})
     monkeypatch.setattr(app, "_models_initialized", True)
     monkeypatch.setattr(app, "_models_init_error", None)
@@ -801,6 +810,7 @@ def test_ready_response_reports_ranker_author_idx_map(monkeypatch):
     body = json.loads(response.body)
     assert body["ready"] is True
     assert body["author_idx_maps"]["ranker"]["ready"] is True
+    assert body["models"][0]["max_history_len"] == 6
     assert "two-tower" not in body["author_idx_maps"]
 
 

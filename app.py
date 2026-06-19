@@ -51,10 +51,6 @@ GE_INFERENCE_CONTENT_EMBED_DIM = int(os.getenv("GE_INFERENCE_CONTENT_EMBED_DIM",
 if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
     raise ValueError("Must supply a valid (positive) GE_INFERENCE_CONTENT_EMBED_DIM!")
 
-GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN = int(os.getenv("GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN", "0")) 
-if GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN <= 0:
-    raise ValueError("Must supply a valid (positive) GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN!")
-
 GE_INFERENCE_MAX_BATCH: int | None = int(os.getenv("GE_INFERENCE_MAX_BATCH", "0"))
 if GE_INFERENCE_MAX_BATCH == 0:
     GE_INFERENCE_MAX_BATCH = None
@@ -101,6 +97,26 @@ def _required_author_idx_map_names(model_types: list[ModelType]) -> list[AuthorI
     return names
 
 
+def _get_max_history_len(model_type: ModelType) -> int | None:
+    match model_type:
+        case "user-tower":
+            env_var_name = "GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"
+        case "ranker":
+            env_var_name = "GE_INFERENCE_RANKER_MAX_HISTORY_LEN"
+        case "post-tower":
+            env_var_name = None
+        case _:
+            assert_never(model_type)
+
+    if env_var_name is None:
+        return None
+    else:
+        max_history_len = int(os.getenv(env_var_name, "0")) 
+        if max_history_len <= 0:
+            raise ValueError(f"Must supply a valid (positive) {env_var_name}!")
+        return max_history_len
+
+
 def _author_idx_map_env_var(author_idx_map_name: AuthorIdxType) -> str:
     match author_idx_map_name:
         case "two-tower":
@@ -122,6 +138,7 @@ class LoadedModel:
     resolved_model_path: str | None = None
     resolved_model_id: str | None = None
     model_uuid: str | None = None
+    max_history_len: int | None = None
 
     load_error: str | None = None
     load_started_at: float | None = None
@@ -537,22 +554,26 @@ def _warmup_entry(entry: LoadedModel) -> None:
         if entry.model_type == "user-tower":
             if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
                 return
+            if entry.max_history_len is None:
+                return
             history_embeddings = torch.zeros(
-                (1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
+                (1, entry.max_history_len, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
             )
-            history_mask = torch.ones((1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN), dtype=torch.bool, device=device)
-            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN], dtype=torch.int64, device=device)
+            history_mask = torch.ones((1, entry.max_history_len), dtype=torch.bool, device=device)
+            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * entry.max_history_len], dtype=torch.int64, device=device)
             _ = model(history_embeddings, history_mask, history_author_indices)
             return
         
         if entry.model_type == "ranker":
             if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
                 return
+            if entry.max_history_len is None:
+                return
             history_embeddings = torch.zeros(
-                (1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
+                (1, entry.max_history_len, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
             )
-            history_mask = torch.ones((1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN), dtype=torch.bool, device=device)
-            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN], dtype=torch.int64, device=device)
+            history_mask = torch.ones((1, entry.max_history_len), dtype=torch.bool, device=device)
+            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * entry.max_history_len], dtype=torch.int64, device=device)
             candidate_post_embeddings = torch.zeros((1, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
             candidate_author_indices = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
             _ = model(
@@ -639,6 +660,7 @@ def _resolve_model_file(entry: LoadedModel) -> tuple[str, str | None]:
 
 def _load_entry(entry: LoadedModel) -> None:
     device = _choose_device()
+    entry.max_history_len = _get_max_history_len(entry.model_type)
     model_file, model_id = _resolve_model_file(entry)
 
     m = torch.jit.load(model_file, map_location=device)
@@ -778,9 +800,11 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     else None
                 )
                 # take raw list inputs and pad/truncate:
+                if entry.max_history_len is None:
+                    raise ValueError(f"No history length env variable set for model {entry.model_type}!")
                 history_embeddings_padded, history_mask_padded, author_indices_padded = get_padded_embedding_history_and_mask_batched(
                     history_embeddings=req.history_embeddings,
-                    max_history_len=GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
+                    max_history_len=entry.max_history_len,
                     embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
                     author_indices=author_indices_list,
                 )
@@ -878,6 +902,7 @@ def ready():
                 "device": str(entry.device) if entry.device else None,
                 "model_path": entry.resolved_model_path,
                 "model_id": entry.resolved_model_id,
+                "max_history_len": entry.max_history_len,
                 "load_error": entry.load_error,
                 "load_started_at": _format_timestamp(entry.load_started_at),
                 "load_finished_at": _format_timestamp(entry.load_finished_at),
@@ -888,7 +913,6 @@ def ready():
         "ready": all_ready,
         "registry_error": _models_init_error,
         "embed_dim": GE_INFERENCE_CONTENT_EMBED_DIM if GE_INFERENCE_CONTENT_EMBED_DIM > 0 else None,
-        "two_tower_max_seq_len": GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
         "author_idx_maps_error": _author_idx_maps_init_error,
         "author_idx_maps": author_idx_maps_payload,
         "models": models_payload,
@@ -911,6 +935,7 @@ def list_models() -> dict:
                 "device": str(entry.device) if entry.device else None,
                 "model_path": entry.resolved_model_path,
                 "model_id": entry.resolved_model_id,
+                "max_history_len": entry.max_history_len,
                 "load_error": entry.load_error,
                 "load_started_at": _format_timestamp(entry.load_started_at),
                 "load_finished_at": _format_timestamp(entry.load_finished_at),
