@@ -59,9 +59,11 @@ GE_INFERENCE_MAX_BATCH: int | None = int(os.getenv("GE_INFERENCE_MAX_BATCH", "0"
 if GE_INFERENCE_MAX_BATCH == 0:
     GE_INFERENCE_MAX_BATCH = None
 
-GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI: str = os.getenv("GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI", "")
-if GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI == "":
-    raise ValueError("Must supply a valid GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI!")
+GE_INFERENCE_MODELS = os.getenv("GE_INFERENCE_MODELS", "").strip()
+if not GE_INFERENCE_MODELS:
+    raise RuntimeError(
+        "No models configured. Set GE_INFERENCE_MODELS (e.g. 'user-tower,post-tower')."
+    )
 
 DTYPE_FLOAT = torch.float32
 
@@ -72,7 +74,11 @@ AUTHOR_UNK_IDX = 1
 # State
 # -------------------------
 ModelType = Literal["user-tower", "post-tower", "ranker"]
+AuthorIdxType = Literal["two-tower", "ranker"]
 
+_env_model_types: list[str] = GE_INFERENCE_MODELS.split(",")
+if len(_env_model_types) > len(get_args(ModelType)):
+    raise RuntimeError(f"Too many models configured ({len(GE_INFERENCE_MODELS)}). Max is 3.")
 
 @dataclass
 class LoadedModel:
@@ -97,11 +103,24 @@ _models_initialized = False
 _models_init_error: str | None = None
 _models: dict[str, LoadedModel] = {}
 
-_two_tower_author_idx_by_did: dict[str, int] | None = None
-_two_tower_author_idx_map_load_error: str | None = None
-_two_tower_author_idx_map_load_started_at: float | None = None
-_two_tower_author_idx_map_load_finished_at: float | None = None
-_two_tower_author_idx_map_resolved_path: str | None = None
+
+@dataclass
+class AuthorIdxMap:
+    name: str
+    uri: str
+    idx_by_did: dict[str, int] | None = None
+    load_error: str | None = None
+    load_started_at: float | None = None
+    load_finished_at: float | None = None
+    resolved_path: str | None = None
+
+
+_author_idx_maps_init_error: str | None = None
+_author_idx_maps_initialized = False
+_author_idx_maps: dict[str, AuthorIdxMap] = {}
+
+for x in get_args(AuthorIdxType):
+    print(x)
 
 
 # -------------------------
@@ -362,37 +381,68 @@ def _load_author_idx_map_from_parquet(path: str) -> dict[str, int]:
     return author_idx_by_did
 
 
-def _ensure_two_tower_author_idx_map_loaded() -> None:
-    global _two_tower_author_idx_by_did, _two_tower_author_idx_map_load_error
-    global _two_tower_author_idx_map_load_started_at, _two_tower_author_idx_map_load_finished_at, _two_tower_author_idx_map_resolved_path
+def _load_single_author_idx_map(author_idx_map: AuthorIdxMap) -> None:
+    try:  
+        if author_idx_map.idx_by_did is not None:
+            return
+        if author_idx_map.load_started_at is not None and author_idx_map.load_finished_at is None:
+            return
+        
+        author_idx_map.load_started_at = time.time()
+        author_idx_map.resolved_path = _resolve_author_idx_map_file(author_idx_map.uri)
+        author_idx_map.idx_by_did = _load_author_idx_map_from_parquet(author_idx_map.resolved_path)
+        author_idx_map.load_error = None
+        logger.info(
+            "Two Tower author idx map loaded | source=%s | path=%s | entries=%s",
+            author_idx_map.uri,
+            author_idx_map.resolved_path,
+            len(author_idx_map.idx_by_did),
+        )
+    except Exception as e:
+        author_idx_map.idx_by_did = None
+        author_idx_map.load_error = str(e)
+        logger.exception(
+            "Two tower author idx map load failed | source=%s | error=%s", author_idx_map.uri, e)
+    finally:
+        author_idx_map.load_finished_at = time.time()
 
-    if _two_tower_author_idx_by_did is not None:
+
+def _ensure_author_idx_maps_loaded() -> None:
+    global _author_idx_maps, _author_idx_maps_initialized, _author_idx_maps_init_error
+
+    if _author_idx_maps_initialized:
         return
 
     with _models_lock:
-        if _two_tower_author_idx_by_did is not None:
-            return
-        if _two_tower_author_idx_map_load_started_at is not None and _two_tower_author_idx_map_load_finished_at is None:
-            return
-
-        _two_tower_author_idx_map_load_started_at = time.time()
-        try:
-            resolved_path = _resolve_author_idx_map_file(GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI)
-            _two_tower_author_idx_by_did = _load_author_idx_map_from_parquet(resolved_path)
-            _two_tower_author_idx_map_resolved_path = resolved_path
-            _two_tower_author_idx_map_load_error = None
-            logger.info(
-                "Author idx map loaded | source=%s | path=%s | entries=%s",
-                GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
-                resolved_path,
-                len(_two_tower_author_idx_by_did),
+        models_env = os.getenv("GE_INFERENCE_MODELS", "").strip()
+        if not models_env:
+            raise RuntimeError(
+                "No models configured. Set GE_INFERENCE_MODELS (e.g. 'user-tower,post-tower')."
             )
-        except Exception as e:
-            _two_tower_author_idx_by_did = None
-            _two_tower_author_idx_map_load_error = str(e)
-            logger.exception("Author idx map load failed | source=%s | error=%s", GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI, e)
-        finally:
-            _two_tower_author_idx_map_load_finished_at = time.time()
+        env_model_types: list[str] = models_env.split(",")
+        if len(env_model_types) > len(get_args(ModelType)):
+            raise RuntimeError(f"Too many models configured ({len(env_model_types)}). Max is 3.")
+        
+        # load two tower author idx map:
+        if "post-tower" in env_model_types or "user-tower" in env_model_types:
+            if "two-tower" not in _author_idx_maps or _author_idx_maps["two-tower"] is None:
+                GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI: str = os.getenv("GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI", "")
+                if GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI == "":
+                    raise ValueError("Must supply a valid GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI!")
+                
+                _author_idx_maps["two-tower"] = AuthorIdxMap(name="two-tower", uri=GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI)
+            
+            _load_single_author_idx_map(_author_idx_maps["two-tower"])
+
+        if "ranker" in env_model_types:
+            if "ranker" not in _author_idx_maps or _author_idx_maps["ranker"] is None:
+                GE_INFERENCE_RANKER_AUTHOR_MAP_URI: str = os.getenv("GE_INFERENCE_RANKER_AUTHOR_MAP_URI", "")
+                if GE_INFERENCE_RANKER_AUTHOR_MAP_URI == "":
+                    raise ValueError("Must supply a valid GE_INFERENCE_RANKER_AUTHOR_MAP_URI!")
+                
+                _author_idx_maps["ranker"] = AuthorIdxMap(name="ranker", uri=GE_INFERENCE_RANKER_AUTHOR_MAP_URI)
+
+            _load_single_author_idx_map(_author_idx_maps["ranker"])
 
 
 def _validate_model_type(model_type: str) -> ModelType:
@@ -512,20 +562,10 @@ def _init_registry() -> None:
             user_tower_uri = manifest["user_tower_uri"]
             user_tower_uuid = manifest["user_tower_clearml_model_id"]
 
-            models_env = os.getenv("GE_INFERENCE_MODELS", "").strip()
-            if not models_env:
-                raise RuntimeError(
-                    "No models configured. Set GE_INFERENCE_MODELS (e.g. 'user-tower,post-tower')."
-                )
-
-            env_model_types: list[str] = models_env.split(",")
-            if len(env_model_types) > 2:
-                raise RuntimeError(f"Too many models configured ({len(env_model_types)}). Max is 2.")
-
             tower_uris = {"post-tower": (post_tower_uri, post_tower_uuid), "user-tower": (user_tower_uri, user_tower_uuid)}
 
             seen: set[str] = set()
-            for env_model_type in env_model_types:
+            for env_model_type in _env_model_types:
                 if env_model_type in seen:
                     continue
                 seen.add(env_model_type)
@@ -597,7 +637,7 @@ def _load_entry(entry: LoadedModel) -> None:
 def ensure_models_loaded() -> None:
     """Concurrency-safe, idempotent load of all configured models."""
     _init_registry()
-    _ensure_two_tower_author_idx_map_loaded()
+    _ensure_author_idx_maps_loaded()
     if _models_init_error is not None:
         logger.error("Model registry init failed: %s", _models_init_error)
         return
@@ -650,19 +690,24 @@ def _get_single_author_idx_from_did(author_did: str, author_idx_by_did: dict[str
 
 def _get_author_indices_from_dids(
     author_dids: str | list[str] | list[list[str]],
+    author_idx_map_name: str,
 ) -> list[int] | list[list[int]]:
-    if isinstance(author_dids, str):
-        if _two_tower_author_idx_by_did is None:
+    
+    if author_idx_map_name not in _author_idx_maps or _author_idx_maps[author_idx_map_name] is None:
+        raise HTTPException(status_code=503, detail="Author idx map not loaded")
+    else:
+        author_idx_map = _author_idx_maps[author_idx_map_name].idx_by_did
+        if author_idx_map is None:
             raise HTTPException(status_code=503, detail="Author idx map not loaded")
-        return [_get_single_author_idx_from_did(author_dids, _two_tower_author_idx_by_did)]
+        
+    if isinstance(author_dids, str):
+        return [_get_single_author_idx_from_did(author_dids, author_idx_map)]
     elif isinstance(author_dids, list):
         if len(author_dids) == 0:
             return []
-        if _two_tower_author_idx_by_did is None:
-            raise HTTPException(status_code=503, detail="Author idx map not loaded")
         elif isinstance(author_dids[0], str):
             return [
-                _get_single_author_idx_from_did(did, _two_tower_author_idx_by_did) # type: ignore
+                _get_single_author_idx_from_did(did, author_idx_map) # type: ignore
                 for did in author_dids
             ]
         else: 
@@ -670,7 +715,7 @@ def _get_author_indices_from_dids(
                 raise HTTPException(status_code=422, detail="author dids must either be a string, a list of strings, or a list of list of strings")
             return [
                 [
-                    _get_single_author_idx_from_did(did, _two_tower_author_idx_by_did)
+                    _get_single_author_idx_from_did(did, author_idx_map)
                     for did in author_did_list
                 ] 
                 for author_did_list in author_dids
@@ -681,7 +726,7 @@ def _get_target_author_indices_for_request(
     req: PostTowerPredictRequest,
 ) -> list[int] | list[list[int]]:
     if req.target_author_dids is not None:
-        return _get_author_indices_from_dids(req.target_author_dids)
+        return _get_author_indices_from_dids(req.target_author_dids, "two-tower")
     if isinstance(req.post_embeddings[0], list):
         return [AUTHOR_UNK_IDX] * len(req.post_embeddings)
     return [AUTHOR_UNK_IDX]
@@ -702,7 +747,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     )
 
                 author_indices_list = (
-                    _get_author_indices_from_dids(req.history_author_dids)
+                    _get_author_indices_from_dids(req.history_author_dids, "two-tower")
                     if req.history_author_dids is not None
                     else None
                 )
@@ -734,11 +779,28 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 author_indices = _tensor_from_nested_list("target_author_dids", author_indices_list, torch.int64, entry.device)
                 y = entry.module(post_embeddings, author_indices)
                 return y
+            case "ranker":
+                pass
             case _:
                 assert_never(entry.model_type)
 
     raise HTTPException(status_code=500, detail=f"Unsupported model type: {entry.model_type}")
 
+
+def _get_author_idx_map_summary(author_idx_map_name: str, is_ready: bool) -> dict[str, Any]:
+    author_idx_map = _author_idx_maps[author_idx_map_name]
+    num_entries = None
+    if author_idx_map.idx_by_did is not None:
+        num_entries = len(author_idx_map.idx_by_did)
+    return {
+        "ready": is_ready,
+        "uri": _author_idx_maps[author_idx_map_name].uri,
+        "resolved_path": _author_idx_maps[author_idx_map_name].resolved_path,
+        "num_entries": num_entries,
+        "load_error": _author_idx_maps[author_idx_map_name].load_error,
+        "load_started_at": _format_timestamp(_author_idx_maps[author_idx_map_name].load_started_at),
+        "load_finished_at": _format_timestamp(_author_idx_maps[author_idx_map_name].load_finished_at),
+    }
 
 # -------------------------
 # Endpoints
@@ -756,7 +818,10 @@ def ready():
 
     models_payload: list[dict[str, Any]] = []
     all_ready = _models_init_error is None and len(_models) > 0
-    two_tower_author_idx_map_ready = _two_tower_author_idx_by_did is not None and _two_tower_author_idx_map_load_error is None
+    two_tower_author_idx_map_ready = (
+        _author_idx_maps["two-tower"].idx_by_did is not None and
+        _author_idx_maps["two-tower"].load_error is None
+    )
     all_ready = all_ready and two_tower_author_idx_map_ready
     for entry in _models.values():
         model_ready = entry.module is not None and entry.device is not None and entry.load_error is None
@@ -780,15 +845,7 @@ def ready():
         "registry_error": _models_init_error,
         "embed_dim": GE_INFERENCE_CONTENT_EMBED_DIM if GE_INFERENCE_CONTENT_EMBED_DIM > 0 else None,
         "two_tower_max_seq_len": GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
-        "two_tower_author_idx_map": {
-            "ready": two_tower_author_idx_map_ready,
-            "uri": GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
-            "resolved_path": _two_tower_author_idx_map_resolved_path,
-            "num_entries": len(_two_tower_author_idx_by_did) if _two_tower_author_idx_by_did is not None else None,
-            "load_error": _two_tower_author_idx_map_load_error,
-            "load_started_at": _format_timestamp(_two_tower_author_idx_map_load_started_at),
-            "load_finished_at": _format_timestamp(_two_tower_author_idx_map_load_finished_at),
-        },
+        "two_tower_author_idx_map": _get_author_idx_map_summary("two-tower", two_tower_author_idx_map_ready),
         "models": models_payload,
     }
 
@@ -800,6 +857,10 @@ def list_models() -> dict:
     _init_registry()
     ensure_models_loaded()
     models_payload: list[dict[str, Any]] = []
+    two_tower_author_idx_map_ready = (
+        _author_idx_maps["two-tower"].idx_by_did is not None and
+        _author_idx_maps["two-tower"].load_error is None
+    )
     for entry in _models.values():
         models_payload.append(
             {
@@ -816,15 +877,7 @@ def list_models() -> dict:
     return {
         "models": models_payload,
         "registry_error": _models_init_error,
-        "two_tower_author_idx_map": {
-            "ready": _two_tower_author_idx_by_did is not None and _two_tower_author_idx_map_load_error is None,
-            "uri": GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
-            "resolved_path": _two_tower_author_idx_map_resolved_path,
-            "num_entries": len(_two_tower_author_idx_by_did) if _two_tower_author_idx_by_did is not None else None,
-            "load_error": _two_tower_author_idx_map_load_error,
-            "load_started_at": _format_timestamp(_two_tower_author_idx_map_load_started_at),
-            "load_finished_at": _format_timestamp(_two_tower_author_idx_map_load_finished_at),
-        },
+        "two_tower_author_idx_map": _get_author_idx_map_summary("two-tower", two_tower_author_idx_map_ready),
     }
 
 
