@@ -93,6 +93,7 @@ def _load_app_module(
     author_idx_map_uri: str | None = DEFAULT_AUTHOR_IDX_MAP_URI,
     ranker_author_idx_map_uri: str | None = None,
     ranker_max_history_len: int | None = 6,
+    ranker_manifest_uri: str | None = None,
     model_types: str = "post-tower,user-tower",
 ):
     _install_stub_modules()
@@ -115,6 +116,10 @@ def _load_app_module(
         os.environ.pop("GE_INFERENCE_RANKER_AUTHOR_MAP_URI", None)
     else:
         os.environ["GE_INFERENCE_RANKER_AUTHOR_MAP_URI"] = ranker_author_idx_map_uri
+    if ranker_manifest_uri is None:
+        os.environ.pop("GE_INFERENCE_RANKER_MANIFEST_URI", None)
+    else:
+        os.environ["GE_INFERENCE_RANKER_MANIFEST_URI"] = ranker_manifest_uri
     os.environ.pop("GE_INFERENCE_AUTHOR_MAP_URI", None)
 
     spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
@@ -702,11 +707,24 @@ SAMPLE_MANIFEST = {
     "clearml_task_id": "task-xyz",
 }
 
+SAMPLE_RANKER_MANIFEST = {
+    "ranker_clearml_model_id": "ranker-model-ghi789",
+    "ranker_uri": "gs://fake-bucket/ranker.pt",
+    "clearml_task_id": "ranker-task-xyz",
+}
+
 
 def _write_manifest(tmp_path, manifest=None) -> str:
     import json
     path = tmp_path / "two_tower_serving_manifest.json"
     path.write_text(json.dumps(manifest or SAMPLE_MANIFEST))
+    return str(path)
+
+
+def _write_ranker_manifest(tmp_path, manifest=None) -> str:
+    import json
+    path = tmp_path / "ranker_serving_manifest.json"
+    path.write_text(json.dumps(manifest or SAMPLE_RANKER_MANIFEST))
     return str(path)
 
 
@@ -745,6 +763,46 @@ def test_init_registry_sets_configured_model_uri_from_manifest(tmp_path):
 
     assert app._models_init_error is None
     assert app._models["post-tower"].configured_model_uri == "gs://fake-bucket/post_tower.pt"
+
+
+def test_init_registry_does_not_require_ranker_manifest_without_ranker(tmp_path):
+    app = _load_app_module("inference_service_manifest_no_ranker_tests")
+    os.environ["GE_INFERENCE_TWO_TOWER_MANIFEST_URI"] = _write_manifest(tmp_path)
+    os.environ.pop("GE_INFERENCE_RANKER_MANIFEST_URI", None)
+    os.environ["GE_INFERENCE_MODELS"] = "post-tower,user-tower"
+
+    app._models_initialized = False
+    app._init_registry()
+
+    assert app._models_init_error is None
+    assert set(app._models) == {"post-tower", "user-tower"}
+
+
+def test_init_registry_requires_ranker_manifest_when_ranker_configured(tmp_path):
+    app = _load_app_module("inference_service_missing_ranker_manifest_tests", model_types="ranker")
+    os.environ["GE_INFERENCE_TWO_TOWER_MANIFEST_URI"] = _write_manifest(tmp_path)
+    os.environ.pop("GE_INFERENCE_RANKER_MANIFEST_URI", None)
+    os.environ["GE_INFERENCE_MODELS"] = "ranker"
+
+    app._models_initialized = False
+    app._init_registry()
+
+    assert app._models_init_error is not None
+    assert "GE_INFERENCE_RANKER_MANIFEST_URI" in app._models_init_error
+
+
+def test_init_registry_sets_ranker_metadata_from_manifest(tmp_path):
+    app = _load_app_module("inference_service_ranker_manifest_tests", model_types="ranker")
+    os.environ["GE_INFERENCE_TWO_TOWER_MANIFEST_URI"] = _write_manifest(tmp_path)
+    os.environ["GE_INFERENCE_RANKER_MANIFEST_URI"] = _write_ranker_manifest(tmp_path)
+    os.environ["GE_INFERENCE_MODELS"] = "ranker"
+
+    app._models_initialized = False
+    app._init_registry()
+
+    assert app._models_init_error is None
+    assert app._models["ranker"].model_uuid == "ranker-model-ghi789"
+    assert app._models["ranker"].configured_model_uri == "gs://fake-bucket/ranker.pt"
 
 
 def test_init_registry_fails_on_missing_manifest_keys(tmp_path):

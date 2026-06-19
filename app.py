@@ -97,6 +97,16 @@ def _required_author_idx_map_names(model_types: list[ModelType]) -> list[AuthorI
     return names
 
 
+def _author_idx_map_env_var(author_idx_map_name: AuthorIdxType) -> str:
+    match author_idx_map_name:
+        case "two-tower":
+            return "GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"
+        case "ranker":
+            return "GE_INFERENCE_RANKER_AUTHOR_MAP_URI"
+        case _:
+            assert_never(author_idx_map_name)
+
+
 def _get_max_history_len(model_type: ModelType) -> int | None:
     match model_type:
         case "user-tower":
@@ -116,15 +126,6 @@ def _get_max_history_len(model_type: ModelType) -> int | None:
             raise ValueError(f"Must supply a valid (positive) {env_var_name}!")
         return max_history_len
 
-
-def _author_idx_map_env_var(author_idx_map_name: AuthorIdxType) -> str:
-    match author_idx_map_name:
-        case "two-tower":
-            return "GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"
-        case "ranker":
-            return "GE_INFERENCE_RANKER_AUTHOR_MAP_URI"
-        case _:
-            assert_never(author_idx_map_name)
 
 @dataclass
 class LoadedModel:
@@ -376,7 +377,7 @@ def _download_gcs_uri_to_local(gs_uri: str) -> str:
 
 
 def _load_manifest(uri: str) -> dict:
-    """Load the two_tower_serving_manifest.json from a local path or GCS URI."""
+    """Load the {model_type}_serving_manifest.json from a local path or GCS URI."""
     import json
     path = _download_gcs_uri_to_local(uri) if uri.startswith("gs://") else uri
     with open(path) as f:
@@ -594,6 +595,7 @@ def _init_registry() -> None:
 
         try:
             models: dict[str, LoadedModel] = {}
+            configured_model_types = _configured_model_types()
 
             two_tower_manifest_uri = os.getenv("GE_INFERENCE_TWO_TOWER_MANIFEST_URI", "").strip()
             if not two_tower_manifest_uri:
@@ -602,23 +604,37 @@ def _init_registry() -> None:
                     "the two_tower_serving_manifest.json produced by training."
                 )
 
-            manifest = _load_manifest(two_tower_manifest_uri)
-            post_tower_uri = manifest["post_tower_uri"]
-            post_tower_uuid = manifest["post_tower_clearml_model_id"]
-            user_tower_uri = manifest["user_tower_uri"]
-            user_tower_uuid = manifest["user_tower_clearml_model_id"]
+            two_tower_manifest = _load_manifest(two_tower_manifest_uri)
+            post_tower_uri = two_tower_manifest["post_tower_uri"]
+            post_tower_uuid = two_tower_manifest["post_tower_clearml_model_id"]
+            user_tower_uri = two_tower_manifest["user_tower_uri"]
+            user_tower_uuid = two_tower_manifest["user_tower_clearml_model_id"]
 
-            tower_uris = {"post-tower": (post_tower_uri, post_tower_uuid), "user-tower": (user_tower_uri, user_tower_uuid)}
+            model_metadata = {"post-tower": (post_tower_uri, post_tower_uuid), "user-tower": (user_tower_uri, user_tower_uuid)}
+
+            if "ranker" in configured_model_types:
+                ranker_manifest_uri = os.getenv("GE_INFERENCE_RANKER_MANIFEST_URI", "").strip()
+                if not ranker_manifest_uri:
+                    raise RuntimeError(
+                        "GE_INFERENCE_RANKER_MANIFEST_URI is required — set it to the GCS URI or local path of "
+                        "the ranker_serving_manifest.json produced by training."
+                    )
+
+                ranker_manifest = _load_manifest(ranker_manifest_uri)
+                ranker_uri = ranker_manifest["ranker_uri"]
+                ranker_uuid = ranker_manifest["ranker_clearml_model_id"]
+
+                model_metadata["ranker"] = (ranker_uri, ranker_uuid)
 
             seen: set[ModelType] = set()
-            for model_type in _configured_model_types():
+            for model_type in configured_model_types:
                 if model_type in seen:
                     continue
                 seen.add(model_type)
 
-                if model_type not in tower_uris:
-                    raise RuntimeError(f"Model type '{model_type}' is not supported by two tower manifest loading yet.")
-                uri, model_uuid = tower_uris[model_type]
+                if model_type not in model_metadata:
+                    raise RuntimeError(f"Model type '{model_type}' is not supported by manifest loading yet.")
+                uri, model_uuid = model_metadata[model_type]
 
                 models[model_type] = LoadedModel(
                     model_type=model_type,
