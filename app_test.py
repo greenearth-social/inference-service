@@ -12,6 +12,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[0]
 APP_PATH = REPO_ROOT / "app.py"
 DEFAULT_AUTHOR_IDX_MAP_URI = "gs://test-bucket/author_idx.parquet"
+DEFAULT_RANKER_AUTHOR_IDX_MAP_URI = "gs://test-bucket/ranker_author_idx.parquet"
 
 
 def _install_stub_modules() -> None:
@@ -90,18 +91,25 @@ def _load_app_module(
     embed_dim: int = 3,
     max_history_len: int = 8,
     author_idx_map_uri: str | None = DEFAULT_AUTHOR_IDX_MAP_URI,
+    ranker_author_idx_map_uri: str | None = None,
+    model_types: str = "post-tower,user-tower",
 ):
     _install_stub_modules()
 
     os.environ["GE_INFERENCE_MAX_BATCH"] = str(max_batch)
     os.environ["GE_INFERENCE_CONTENT_EMBED_DIM"] = str(embed_dim)
     os.environ["GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"] = str(max_history_len)
+    os.environ["GE_INFERENCE_MODELS"] = model_types
     os.environ.pop("GE_INFERENCE_EMBED_DIM", None)
     os.environ.pop("GE_INFERENCE_MAX_HISTORY_LEN", None)
     if author_idx_map_uri is None:
         os.environ.pop("GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI", None)
     else:
         os.environ["GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"] = author_idx_map_uri
+    if ranker_author_idx_map_uri is None:
+        os.environ.pop("GE_INFERENCE_RANKER_AUTHOR_MAP_URI", None)
+    else:
+        os.environ["GE_INFERENCE_RANKER_AUTHOR_MAP_URI"] = ranker_author_idx_map_uri
     os.environ.pop("GE_INFERENCE_AUTHOR_MAP_URI", None)
 
     spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
@@ -140,6 +148,14 @@ def _install_fake_pyarrow(monkeypatch, rows):
     pyarrow.parquet = parquet
     monkeypatch.setitem(sys.modules, "pyarrow", pyarrow)
     monkeypatch.setitem(sys.modules, "pyarrow.parquet", parquet)
+
+
+def _set_author_idx_map(app, monkeypatch, idx_by_did, name="two-tower"):
+    monkeypatch.setattr(
+        app,
+        "_author_idx_maps",
+        {name: app.AuthorIdxMap(name=name, uri="gs://test-bucket/author_idx.parquet", idx_by_did=idx_by_did)},
+    )
 
 
 @pytest.fixture(scope="module")
@@ -187,9 +203,14 @@ def test_rejects_top_level_list_that_does_not_contain_lists(app_shape):
         app_shape.classify_history_embeddings_shape([1.0, 2.0])
 
 
-def test_requires_author_idx_map_uri():
-    with pytest.raises(ValueError, match="GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"):
-        _load_app_module("inference_service_app_missing_author_map_tests", author_idx_map_uri=None)
+def test_records_missing_author_idx_map_uri_as_init_error():
+    app = _load_app_module("inference_service_app_missing_author_map_tests", author_idx_map_uri=None)
+
+    app._ensure_author_idx_maps_loaded()
+
+    assert app._author_idx_maps_init_error is not None
+    assert "GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI" in app._author_idx_maps_init_error
+    assert app._author_idx_maps_initialized is False
 
 
 def test_accepts_empty_flat_history(app_request):
@@ -383,11 +404,14 @@ def test_author_idx_map_loads_from_configured_uri(tmp_path, monkeypatch):
         author_idx_map_uri=str(parquet_path),
     )
 
-    app_author_map._ensure_two_tower_author_idx_map_loaded()
+    app_author_map._ensure_author_idx_maps_loaded()
 
-    assert app_author_map._two_tower_author_idx_by_did == {"did:plc:one": 2, "did:plc:two": 3}
-    assert app_author_map._two_tower_author_idx_map_resolved_path == str(parquet_path)
-    assert app_author_map._two_tower_author_idx_map_load_error is None
+    author_idx_map = app_author_map._author_idx_maps["two-tower"]
+    assert author_idx_map.idx_by_did == {"did:plc:one": 2, "did:plc:two": 3}
+    assert author_idx_map.resolved_path == str(parquet_path)
+    assert author_idx_map.load_error is None
+    assert app_author_map._author_idx_maps_init_error is None
+    assert app_author_map._author_idx_maps_initialized is True
 
 
 def test_author_idx_map_rejects_duplicate_author_did(tmp_path, monkeypatch):
@@ -405,10 +429,41 @@ def test_author_idx_map_rejects_duplicate_author_did(tmp_path, monkeypatch):
         author_idx_map_uri=str(parquet_path),
     )
 
-    app_author_map._ensure_two_tower_author_idx_map_loaded()
+    app_author_map._ensure_author_idx_maps_loaded()
 
-    assert app_author_map._two_tower_author_idx_by_did is None
-    assert "duplicate author_did" in app_author_map._two_tower_author_idx_map_load_error
+    author_idx_map = app_author_map._author_idx_maps["two-tower"]
+    assert author_idx_map.idx_by_did is None
+    assert "duplicate author_did" in author_idx_map.load_error
+    assert app_author_map._author_idx_maps_init_error is None
+    assert app_author_map._author_idx_maps_initialized is False
+
+
+def test_ranker_author_idx_map_loads_from_configured_uri(tmp_path, monkeypatch):
+    parquet_path = tmp_path / "ranker_author_idx.parquet"
+    parquet_path.write_bytes(b"fake parquet")
+    _install_fake_pyarrow(
+        monkeypatch,
+        [
+            {"author_did": "did:plc:ranker-one", "author_idx": 12},
+            {"author_did": "did:plc:ranker-two", "author_idx": 13},
+        ],
+    )
+    app_author_map = _load_app_module(
+        "inference_service_app_ranker_author_map_tests",
+        author_idx_map_uri=None,
+        ranker_author_idx_map_uri=str(parquet_path),
+        model_types="ranker",
+    )
+
+    app_author_map._ensure_author_idx_maps_loaded()
+
+    assert "two-tower" not in app_author_map._author_idx_maps
+    author_idx_map = app_author_map._author_idx_maps["ranker"]
+    assert author_idx_map.idx_by_did == {"did:plc:ranker-one": 12, "did:plc:ranker-two": 13}
+    assert author_idx_map.resolved_path == str(parquet_path)
+    assert author_idx_map.load_error is None
+    assert app_author_map._author_idx_maps_init_error is None
+    assert app_author_map._author_idx_maps_initialized is True
 
 
 def test_get_entry_or_404_returns_404_for_unknown_model(app_request, monkeypatch):
@@ -450,7 +505,7 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
         return app_request.torch.Tensor([[42.0]])
 
     monkeypatch.setattr(app_request, "get_padded_embedding_history_and_mask_batched", fake_pad)
-    monkeypatch.setattr(app_request, "_two_tower_author_idx_by_did", {"author-1": 7, "author-2": 8})
+    _set_author_idx_map(app_request, monkeypatch, {"author-1": 7, "author-2": 8})
 
     entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = user_model
@@ -481,7 +536,7 @@ def test_predict_with_entry_user_tower_uses_real_padding_for_author_indices(app_
         captured["author_indices"] = author_indices.value
         return app_request.torch.Tensor([[42.0]])
 
-    monkeypatch.setattr(app_request, "_two_tower_author_idx_by_did", {"author-1": 7})
+    _set_author_idx_map(app_request, monkeypatch, {"author-1": 7})
 
     entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = user_model
@@ -519,7 +574,7 @@ def test_predict_with_entry_user_tower_defaults_missing_author_dids_to_unknown(a
         captured["author_indices"] = author_indices.value
         return app_request.torch.Tensor([[42.0]])
 
-    monkeypatch.setattr(app_request, "_two_tower_author_idx_by_did", None)
+    monkeypatch.setattr(app_request, "_author_idx_maps", {})
 
     entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = user_model
@@ -564,7 +619,7 @@ def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request, mo
         captured["author_indices"] = author_indices.value
         return app_request.torch.Tensor([[2.0]])
 
-    monkeypatch.setattr(app_request, "_two_tower_author_idx_by_did", {"author-1": 7})
+    _set_author_idx_map(app_request, monkeypatch, {"author-1": 7})
 
     entry = app_request.LoadedModel(model_type="post-tower")
     entry.module = post_model
@@ -586,7 +641,7 @@ def test_predict_with_entry_post_tower_defaults_missing_author_dids_to_unknown(a
         captured["author_indices"] = author_indices.value
         return app_request.torch.Tensor([[2.0], [3.0]])
 
-    monkeypatch.setattr(app_request, "_two_tower_author_idx_by_did", None)
+    monkeypatch.setattr(app_request, "_author_idx_maps", {})
 
     entry = app_request.LoadedModel(model_type="post-tower")
     entry.module = post_model
@@ -710,8 +765,8 @@ def test_ready_response_includes_model_uuid(monkeypatch):
     monkeypatch.setattr(app, "_models_initialized", True)
     monkeypatch.setattr(app, "_models_init_error", None)
     monkeypatch.setattr(app, "ensure_models_loaded", lambda: None)
-    monkeypatch.setattr(app, "_two_tower_author_idx_by_did", {})
-    monkeypatch.setattr(app, "_two_tower_author_idx_map_load_error", None)
+    _set_author_idx_map(app, monkeypatch, {})
+    monkeypatch.setattr(app, "_author_idx_maps_init_error", None)
 
     response = app.ready()
     models_in_response = response.body if hasattr(response, "body") else None
@@ -719,13 +774,41 @@ def test_ready_response_includes_model_uuid(monkeypatch):
     import json
     body = json.loads(response.body)
     assert body["models"][0]["model_uuid"] == "post-model-abc123"
+    assert body["author_idx_maps"]["two-tower"]["ready"] is True
+
+
+def test_ready_response_reports_ranker_author_idx_map(monkeypatch):
+    app = _load_app_module(
+        "inference_service_ready_ranker_author_map_tests",
+        author_idx_map_uri=None,
+        ranker_author_idx_map_uri=DEFAULT_RANKER_AUTHOR_IDX_MAP_URI,
+        model_types="ranker",
+    )
+
+    entry = app.LoadedModel(model_type="ranker", model_uuid="ranker-model-abc123")
+    entry.module = object()
+    entry.device = app.torch.device("cpu")
+    monkeypatch.setattr(app, "_models", {"ranker": entry})
+    monkeypatch.setattr(app, "_models_initialized", True)
+    monkeypatch.setattr(app, "_models_init_error", None)
+    monkeypatch.setattr(app, "ensure_models_loaded", lambda: None)
+    _set_author_idx_map(app, monkeypatch, {"author-1": 7}, name="ranker")
+    monkeypatch.setattr(app, "_author_idx_maps_init_error", None)
+
+    response = app.ready()
+
+    import json
+    body = json.loads(response.body)
+    assert body["ready"] is True
+    assert body["author_idx_maps"]["ranker"]["ready"] is True
+    assert "two-tower" not in body["author_idx_maps"]
 
 
 def test_predict_response_includes_model_uuid(app_request, monkeypatch):
     def post_model(post_embeddings, author_indices):
         return app_request.torch.Tensor([[2.0, 3.0]])
 
-    monkeypatch.setattr(app_request, "_two_tower_author_idx_by_did", {})
+    _set_author_idx_map(app_request, monkeypatch, {})
 
     entry = app_request.LoadedModel(model_type="post-tower", model_uuid="post-model-abc123")
     entry.module = post_model
