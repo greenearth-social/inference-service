@@ -251,30 +251,12 @@ def _validate_user_history(
             assert_never(shape)
 
 
-class UserTowerPredictRequest(BaseModel):
-    # history_embeddings: [T, D] or [B, T, D]
-    history_embeddings: list[list[float]] | list[list[list[float]]]
-    history_author_dids: list[str] | list[list[str]] | None = None
-
-    @model_validator(mode="after")
-    def _validate_history(self) -> "UserTowerPredictRequest":
-        shape = classify_history_embeddings_shape(self.history_embeddings)
-        batch_size = _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
-        return self
-
-
-class PostTowerPredictRequest(BaseModel):
-    # post_embeddings: [D] or [B, D]
-    post_embeddings: list[float] | list[list[float]]
-    target_author_dids: str | list[str] | None = None
-
-    @model_validator(mode="after")
-    def _validate_post_inputs(self) -> "PostTowerPredictRequest":
-        pe = self.post_embeddings
+def _validate_post_embeddings(
+    pe: list[float] | list[list[float]],
+    author_dids: str | list[str] | None,
+) -> int:
         if not isinstance(pe, list) or len(pe) == 0:
             raise ValueError("'post_embeddings' must be a non-empty list")
-
-        author_dids = self.target_author_dids
 
         is_batched = isinstance(pe[0], list)
         if is_batched:
@@ -289,9 +271,10 @@ class PostTowerPredictRequest(BaseModel):
             if GE_INFERENCE_CONTENT_EMBED_DIM and d0 != GE_INFERENCE_CONTENT_EMBED_DIM:
                 raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={d0}")
             if author_dids is None:
-                return self
+                return len(batch)
             if not isinstance(author_dids, list) or len(author_dids) != len(batch):
                 raise ValueError("when post_embeddings is batched, target_author_dids must be a list of the same length as the batch")
+            return len(batch)
         else:
             vec = pe  # type: ignore[assignment]
             if len(vec) == 0:
@@ -299,9 +282,32 @@ class PostTowerPredictRequest(BaseModel):
             if GE_INFERENCE_CONTENT_EMBED_DIM and len(vec) != GE_INFERENCE_CONTENT_EMBED_DIM:
                 raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={len(vec)}")
             if author_dids is None:
-                return self
+                return 1
             if not isinstance(author_dids, str):
                 raise ValueError("target_author_dids must be a single string when post_embeddings is not batched")
+            return 1
+
+
+class UserTowerPredictRequest(BaseModel):
+    # history_embeddings: [T, D] or [B, T, D]
+    history_embeddings: list[list[float]] | list[list[list[float]]]
+    history_author_dids: list[str] | list[list[str]] | None = None
+
+    @model_validator(mode="after")
+    def _validate_history(self) -> "UserTowerPredictRequest":
+        shape = classify_history_embeddings_shape(self.history_embeddings)
+        _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
+        return self
+
+
+class PostTowerPredictRequest(BaseModel):
+    # post_embeddings: [D] or [B, D]
+    post_embeddings: list[float] | list[list[float]]
+    target_author_dids: str | list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_post_inputs(self) -> "PostTowerPredictRequest":
+        _validate_post_embeddings(self.post_embeddings, self.target_author_dids)
         return self
 
 
