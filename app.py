@@ -321,6 +321,11 @@ class RankerPredictRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "RankerPredictRequest":
+        shape = classify_history_embeddings_shape(self.history_embeddings)
+        history_batch_size = _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
+        post_batch_size = _validate_post_embeddings(self.candidate_post_embeddings, self.candidate_author_dids)
+        if history_batch_size != post_batch_size:
+            raise ValueError(f"History batch size ({history_batch_size}) must match candidate post batch size ({post_batch_size})")
         return self
 
 
