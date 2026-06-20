@@ -17,7 +17,11 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Discriminator, Tag, model_validator
 
-from shared.input_data_helpers import get_padded_embedding_history_and_mask_batched, classify_history_embeddings_shape
+from shared.input_data_helpers import (
+    get_padded_embedding_history_and_mask_batched,
+    classify_history_embeddings_shape,
+    HistoryEmbeddingsShape,
+)
 
 
 @asynccontextmanager
@@ -204,6 +208,49 @@ def _validate_batched_user_history(history_embeddings: list[list[Any]]) -> list[
     return hist_len_list
 
 
+def _validate_user_history(
+    shape: HistoryEmbeddingsShape,
+    history_embeddings: list[list[float]] | list[list[list[float]]],
+    history_author_dids: list[str] | list[list[str]] | None
+) -> int:
+    """Returns batch dimension size"""
+    match shape:
+        case "single_empty":
+            if history_author_dids is None:
+                return 1
+            if not isinstance(history_author_dids, list):
+                raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
+            if len(history_author_dids) != 0:
+                raise ValueError("when 'history_embeddings' is empty, 'history_author_dids' must also be empty")
+            return 1
+        case "single_history":
+            hist_len = _validate_single_user_history(history_embeddings) # type: ignore
+            if history_author_dids is None:
+                return 1
+            if not isinstance(history_author_dids, list):
+                raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
+            if len(history_author_dids) == 0 or isinstance(history_author_dids[0], list):
+                raise ValueError("when 'history_embeddings' is a single history, 'history_author_dids' must be a list of strings, not a list of list of strings")
+            if len(history_author_dids) != hist_len:
+                raise ValueError(f"length of 'history_author_dids' must match history length ({hist_len}) when 'history_embeddings' is a single history")
+            return 1
+        case "batched_history":
+            hist_len_list = _validate_batched_user_history(history_embeddings)
+            if history_author_dids is None:
+                return len(hist_len_list)
+            if not isinstance(history_author_dids, list):
+                raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
+            if len(history_author_dids) == 0 or isinstance(history_author_dids[0], str):
+                raise ValueError("when 'history_embeddings' is batched, 'history_author_dids' must be a list of list of strings, not a list of strings")
+            if len(history_author_dids) != len(hist_len_list):
+                raise ValueError(f"length of 'history_author_dids' must match batch size ({len(hist_len_list)}) when 'history_embeddings' is batched")
+            if not all(len(user_hti) == hist_len for user_hti, hist_len in zip(history_author_dids, hist_len_list)):
+                raise ValueError(f"length of each user's 'history_author_dids' must match that user's history length when 'history_embeddings' is batched")
+            return len(hist_len_list)
+        case _:
+            assert_never(shape)
+
+
 class UserTowerPredictRequest(BaseModel):
     # history_embeddings: [T, D] or [B, T, D]
     history_embeddings: list[list[float]] | list[list[list[float]]]
@@ -211,45 +258,9 @@ class UserTowerPredictRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
-        he = self.history_embeddings
-        shape = classify_history_embeddings_shape(he)
-        author_dids = self.history_author_dids
-
-        match shape:
-            case "single_empty":
-                if author_dids is None:
-                    return self
-                if not isinstance(author_dids, list):
-                    raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
-                if len(author_dids) != 0:
-                    raise ValueError("when 'history_embeddings' is empty, 'history_author_dids' must also be empty")
-                return self
-            case "single_history":
-                hist_len = _validate_single_user_history(he) # type: ignore
-                if author_dids is None:
-                    return self
-                if not isinstance(author_dids, list):
-                    raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
-                if len(author_dids) == 0 or isinstance(author_dids[0], list):
-                    raise ValueError("when 'history_embeddings' is a single history, 'history_author_dids' must be a list of strings, not a list of list of strings")
-                if len(author_dids) != hist_len:
-                    raise ValueError(f"length of 'history_author_dids' must match history length ({hist_len}) when 'history_embeddings' is a single history")
-                return self
-            case "batched_history":
-                hist_len_list = _validate_batched_user_history(he)
-                if author_dids is None:
-                    return self
-                if not isinstance(author_dids, list):
-                    raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
-                if len(author_dids) == 0 or isinstance(author_dids[0], str):
-                    raise ValueError("when 'history_embeddings' is batched, 'history_author_dids' must be a list of list of strings, not a list of strings")
-                if len(author_dids) != len(hist_len_list):
-                    raise ValueError(f"length of 'history_author_dids' must match batch size ({len(hist_len_list)}) when 'history_embeddings' is batched")
-                if not all(len(user_hti) == hist_len for user_hti, hist_len in zip(author_dids, hist_len_list)):
-                    raise ValueError(f"length of each user's 'history_author_dids' must match that user's history length when 'history_embeddings' is batched")
-                return self
-            case _:
-                assert_never(shape)
+        shape = classify_history_embeddings_shape(self.history_embeddings)
+        batch_size = _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
+        return self
 
 
 class PostTowerPredictRequest(BaseModel):
@@ -786,13 +797,23 @@ def _get_author_indices_from_dids(
             ]
 
 
-def _get_target_author_indices_for_request(
+def _get_target_author_indices_for_post_tower_request(
     req: PostTowerPredictRequest,
 ) -> list[int] | list[list[int]]:
     if req.target_author_dids is not None:
         return _get_author_indices_from_dids(req.target_author_dids, "two-tower")
     if isinstance(req.post_embeddings[0], list):
         return [AUTHOR_UNK_IDX] * len(req.post_embeddings)
+    return [AUTHOR_UNK_IDX]
+
+
+def _get_target_author_indices_for_ranker_request(
+    req: RankerPredictRequest,
+) -> list[int] | list[list[int]]:
+    if req.candidate_author_dids is not None:
+        return _get_author_indices_from_dids(req.candidate_author_dids, "ranker")
+    if isinstance(req.candidate_post_embeddings[0], list):
+        return [AUTHOR_UNK_IDX] * len(req.candidate_post_embeddings)
     return [AUTHOR_UNK_IDX]
 
 
@@ -830,6 +851,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
 
                 y = entry.module(history_embeddings, history_mask, author_indices)
                 return y
+
             case "post-tower":
                 # Enforce schema against registered model type.
                 if not isinstance(req, PostTowerPredictRequest):
@@ -841,12 +863,52 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 if post_embeddings.dim() == 1:
                     post_embeddings = post_embeddings.unsqueeze(0) # add a batch dimension of size 1 at the beginning
 
-                author_indices_list = _get_target_author_indices_for_request(req)
+                author_indices_list = _get_target_author_indices_for_post_tower_request(req)
                 author_indices = _tensor_from_nested_list("target_author_dids", author_indices_list, torch.int64, entry.device)
                 y = entry.module(post_embeddings, author_indices)
                 return y
+
             case "ranker":
-                pass
+                # Enforce schema against registered model type.
+                if not isinstance(req, RankerPredictRequest):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Model type '{entry.model_type}' expects a ranker request body with history and candidate inputs",
+                    )
+                if entry.max_history_len is None:
+                    raise ValueError(f"No history length env variable set for model {entry.model_type}!")
+
+                # history posts inputs
+                history_author_indices_list = (
+                    _get_author_indices_from_dids(req.history_author_dids, "ranker")
+                    if req.history_author_dids is not None
+                    else None
+                )
+                history_embeddings_padded, history_mask_padded, history_author_indices_padded = get_padded_embedding_history_and_mask_batched(
+                    history_embeddings=req.history_embeddings,
+                    max_history_len=entry.max_history_len,
+                    embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
+                    author_indices=history_author_indices_list,
+                )
+                history_embeddings = _tensor_from_nested_list("history_embeddings", history_embeddings_padded, DTYPE_FLOAT, entry.device)
+                history_mask = _tensor_from_nested_list("history_mask", history_mask_padded, torch.bool, entry.device)
+                history_author_indices = _tensor_from_nested_list("author_indices", history_author_indices_padded, torch.int64, entry.device)
+
+                # candidate post inputs
+                candidate_post_embeddings = _tensor_from_nested_list(
+                    "post_embeddings", req.candidate_post_embeddings, DTYPE_FLOAT, entry.device
+                )
+                if candidate_post_embeddings.dim() == 1:
+                    candidate_post_embeddings = candidate_post_embeddings.unsqueeze(0) # add a batch dimension of size 1 at the beginning
+
+                candidate_author_indices_list = _get_target_author_indices_for_ranker_request(req)
+                candidate_author_indices = _tensor_from_nested_list("candidate_author_dids", candidate_author_indices_list, torch.int64, entry.device)
+
+                y = entry.module(
+                    history_embeddings, history_mask, # HISTORY_TIME_DELTAS_HOURS,
+                    candidate_post_embeddings, history_author_indices, candidate_author_indices,
+                )
+                return y
             case _:
                 assert_never(entry.model_type)
 
