@@ -15,12 +15,19 @@ from clearml import Model
 from fastapi import FastAPI, HTTPException, Security, Body
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Discriminator, Tag, model_validator
+from pydantic import (
+    BaseModel,
+    Discriminator,
+    Tag,
+    model_validator,
+    AwareDatetime
+)
 
 from shared.input_data_helpers import (
     get_padded_embedding_history_and_mask_batched,
     classify_history_embeddings_shape,
     HistoryEmbeddingsShape,
+
 )
 
 
@@ -251,6 +258,35 @@ def _validate_user_history(
             assert_never(shape)
 
 
+def _validate_liked_at_times(
+    shape: HistoryEmbeddingsShape,
+    history_liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]]
+) -> int:
+    """Confirm that the liked-at times have the same shape and return batch size"""
+    match shape:
+        case "single_empty":
+            if len(history_liked_at_times) > 0:
+                if len(history_liked_at_times) > 1:
+                    raise ValueError(f"History embeddings is a single empty entry but liked-at times has multiple entries")
+                if not isinstance(history_liked_at_times[0], list) or len(history_liked_at_times[0]) > 0:
+                    raise ValueError(f"History embeddings is a single empty entry but liked-at times is not empty")
+            return 1
+        case "single_history":
+            if not isinstance(history_liked_at_times, list):
+                raise ValueError("'history_liked_at_times' must be a list")
+            if len(history_liked_at_times) == 0 or isinstance(history_liked_at_times[0], list):
+                raise ValueError("when 'history_embeddings' is a single history, 'history_liked_at_times' must be a list of datetimes, not a list of list of datetimes")
+            return 1
+        case "batched_history":
+            if not isinstance(history_liked_at_times, list):
+                raise ValueError("when 'history_embeddings' is batched, 'history_liked_at_times' must be a list of list of datetimes")
+            if len(history_liked_at_times) == 0 or not isinstance(history_liked_at_times[0], list):
+                raise ValueError("when 'history_embeddings' is batched, 'history_liked_at_times' must be a list of list of datetimes, not a list of datetimes")
+            return len(history_liked_at_times)
+        case _:
+            assert_never(shape)
+
+
 def _validate_post_embeddings(
     pe: list[float] | list[list[float]],
     author_dids: str | list[str] | None,
@@ -315,6 +351,7 @@ class RankerPredictRequest(BaseModel):
     # history_embeddings: [T, D] or [B, T, D]
     history_embeddings: list[list[float]] | list[list[list[float]]]
     history_author_dids: list[str] | list[list[str]] | None = None
+    history_liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]]
     # candidate_post_embeddings: [D] or [B, D]
     candidate_post_embeddings: list[float] | list[list[float]]
     candidate_author_dids: str | list[str] | None = None
@@ -323,6 +360,12 @@ class RankerPredictRequest(BaseModel):
     def _validate_post_inputs(self) -> "RankerPredictRequest":
         shape = classify_history_embeddings_shape(self.history_embeddings)
         history_batch_size = _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
+        history_times_batch_size = _validate_liked_at_times(shape, self.history_liked_at_times)
+        if history_batch_size != history_times_batch_size:
+            raise ValueError(
+                f"History batch size ({history_batch_size}) must match history liked at times batch size ({len(self.history_liked_at_times)})"
+            )
+
         post_batch_size = _validate_post_embeddings(self.candidate_post_embeddings, self.candidate_author_dids)
         if history_batch_size != post_batch_size:
             raise ValueError(f"History batch size ({history_batch_size}) must match candidate post batch size ({post_batch_size})")
@@ -597,10 +640,11 @@ def _warmup_entry(entry: LoadedModel) -> None:
             )
             history_mask = torch.ones((1, entry.max_history_len), dtype=torch.bool, device=device)
             history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * entry.max_history_len], dtype=torch.int64, device=device)
+            history_liked_at_hour_deltas = torch.zeros((1, entry.max_history_len), dtype=DTYPE_FLOAT, device=device)
             candidate_post_embeddings = torch.zeros((1, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
             candidate_author_indices = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
             _ = model(
-                history_embeddings, history_mask, # HISTORY_TIME_DELTAS_HOURS,
+                history_embeddings, history_mask, history_liked_at_hour_deltas,
                 candidate_post_embeddings, history_author_indices, candidate_author_indices,
             )
             return
@@ -828,6 +872,31 @@ def _get_target_author_indices_for_ranker_request(
     return [AUTHOR_UNK_IDX]
 
 
+def _get_time_deltas_hours(
+    liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]],
+) -> list[float] | list[list[float]]:
+    now = datetime.now(timezone.utc)
+
+    if not isinstance(liked_at_times, list):
+        raise HTTPException(status_code=422, detail="liked_at_times must be a list")
+
+    if len(liked_at_times) == 0:
+        return []
+    elif isinstance(liked_at_times[0], list):
+        return [
+            [
+                (now - dt).total_seconds() / 3600
+                for dt in dt_list  # type: ignore
+            ]
+            for dt_list in liked_at_times
+        ]
+    else:
+        return [
+            (now - dt).total_seconds() / 3600  # type: ignore
+            for dt in liked_at_times
+        ]
+
+
 def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
     _require_ready(entry)
     assert entry.module is not None and entry.device is not None
@@ -850,7 +919,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 # take raw list inputs and pad/truncate:
                 if entry.max_history_len is None:
                     raise ValueError(f"No history length env variable set for model {entry.model_type}!")
-                history_embeddings_padded, history_mask_padded, author_indices_padded = get_padded_embedding_history_and_mask_batched(
+                history_embeddings_padded, history_mask_padded, author_indices_padded, _ = get_padded_embedding_history_and_mask_batched(
                     history_embeddings=req.history_embeddings,
                     max_history_len=entry.max_history_len,
                     embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
@@ -895,15 +964,24 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     if req.history_author_dids is not None
                     else None
                 )
-                history_embeddings_padded, history_mask_padded, history_author_indices_padded = get_padded_embedding_history_and_mask_batched(
+                time_deltas_hours_list = _get_time_deltas_hours(req.history_liked_at_times)
+
+                (
+                    history_embeddings_padded,
+                    history_mask_padded,
+                    history_author_indices_padded,
+                    history_time_deltas_hours_padded
+                ) = get_padded_embedding_history_and_mask_batched(
                     history_embeddings=req.history_embeddings,
                     max_history_len=entry.max_history_len,
                     embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
                     author_indices=history_author_indices_list,
+                    time_deltas_hours=time_deltas_hours_list,
                 )
                 history_embeddings = _tensor_from_nested_list("history_embeddings", history_embeddings_padded, DTYPE_FLOAT, entry.device)
                 history_mask = _tensor_from_nested_list("history_mask", history_mask_padded, torch.bool, entry.device)
                 history_author_indices = _tensor_from_nested_list("author_indices", history_author_indices_padded, torch.int64, entry.device)
+                history_time_deltas_hours = _tensor_from_nested_list("time_deltas_hours", history_time_deltas_hours_padded, DTYPE_FLOAT, entry.device)
 
                 # candidate post inputs
                 candidate_post_embeddings = _tensor_from_nested_list(
@@ -916,7 +994,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 candidate_author_indices = _tensor_from_nested_list("candidate_author_dids", candidate_author_indices_list, torch.int64, entry.device)
 
                 y = entry.module(
-                    history_embeddings, history_mask, # HISTORY_TIME_DELTAS_HOURS,
+                    history_embeddings, history_mask, history_time_deltas_hours,
                     candidate_post_embeddings, history_author_indices, candidate_author_indices,
                 )
                 return y
