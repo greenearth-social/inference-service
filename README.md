@@ -297,10 +297,6 @@ Optional flags:
 
 ### Deploying the Service
 
-The current deploy script examples below configure the two tower models. If you
-deploy `ranker`, the Cloud Run environment must also receive the
-`GE_INFERENCE_RANKER_*` variables listed in Configuration Inputs.
-
 Deploy to Cloud Run:
 
 ```bash
@@ -312,6 +308,20 @@ Deploy to Cloud Run:
   --two-tower-max-history-len 128
 ```
 
+To deploy the ranker too, include the ranker manifest, author map, and max
+history length:
+
+```bash
+./scripts/deploy.sh \
+  --models user-tower,post-tower,ranker \
+  --two-tower-manifest-uri gs://greenearth-471522-engagement-prediction-model-stage/.../two_tower_serving_manifest.json \
+  --two-tower-author-map-uri gs://my-bucket/two_tower_author_idx.parquet \
+  --two-tower-max-history-len 128 \
+  --ranker-manifest-uri gs://greenearth-471522-engagement-prediction-model-stage/.../ranker_serving_manifest.json \
+  --ranker-author-map-uri gs://my-bucket/ranker_author_idx.parquet \
+  --ranker-max-history-len 128
+```
+
 Or with environment variables:
 
 ```bash
@@ -320,6 +330,9 @@ GE_INFERENCE_MODELS=user-tower,post-tower \
 GE_INFERENCE_TWO_TOWER_MANIFEST_URI=gs://greenearth-471522-engagement-prediction-model-prod/.../two_tower_serving_manifest.json \
 GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet \
 GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN=128 \
+GE_INFERENCE_RANKER_MANIFEST_URI=gs://greenearth-471522-engagement-prediction-model-prod/.../ranker_serving_manifest.json \
+GE_INFERENCE_RANKER_AUTHOR_MAP_URI=gs://my-bucket/ranker_author_idx.parquet \
+GE_INFERENCE_RANKER_MAX_HISTORY_LEN=128 \
 ./scripts/deploy.sh
 ```
 
