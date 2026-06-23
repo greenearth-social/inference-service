@@ -497,14 +497,15 @@ def test_get_entry_or_404_returns_500_when_registry_init_failed(app_request, mon
 def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request, monkeypatch):
     captured = {}
 
-    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices):
+    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None):
         captured["pad_args"] = {
             "history_embeddings": history_embeddings,
             "max_history_len": max_history_len,
             "embed_dim": embed_dim,
             "author_indices": author_indices,
+            "time_deltas_hours": time_deltas_hours,
         }
-        return [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], [[True, False]], [[7, 0]]
+        return [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], [[True, False]], [[7, 0]], [[0.0, 0.0]]
 
     def user_model(history_embeddings, history_mask, author_indices):
         captured["model_inputs"] = {
@@ -532,6 +533,7 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     assert captured["pad_args"]["max_history_len"] == entry.max_history_len
     assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_CONTENT_EMBED_DIM
     assert captured["pad_args"]["author_indices"] == [7, 8]
+    assert captured["pad_args"]["time_deltas_hours"] is None
     assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
     assert captured["model_inputs"]["history_mask"] == [[True, False]]
     assert captured["model_inputs"]["author_indices"] == [[7, 0]]
