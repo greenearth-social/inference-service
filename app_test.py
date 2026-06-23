@@ -3,6 +3,7 @@ import os
 import sys
 import types
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -181,6 +182,28 @@ def app_request():
 @pytest.fixture(scope="module")
 def app_fixed_dim():
     return _load_app_module("inference_service_app_fixed_dim_tests", max_batch=4, embed_dim=3)
+
+
+def _liked_at(hours_ago: float) -> datetime:
+    return datetime(2026, 1, 1, 12, tzinfo=timezone.utc) - timedelta(hours=hours_ago)
+
+
+def _freeze_app_now(app, monkeypatch, now=None) -> datetime:
+    fixed_now = now or _liked_at(0)
+
+    class FakeDatetime:
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return fixed_now
+            return fixed_now.astimezone(tz)
+
+        @classmethod
+        def fromtimestamp(cls, ts, tz=None):
+            return datetime.fromtimestamp(ts, tz=tz)
+
+    monkeypatch.setattr(app, "datetime", FakeDatetime)
+    return fixed_now
 
 
 def test_classifies_empty_flat_history_as_single_empty(app_shape):
@@ -397,6 +420,81 @@ def test_post_tower_request_enforces_embed_dim(app_fixed_dim):
     app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
     with pytest.raises(ValueError, match="expected D=3"):
         app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0], target_author_dids="author-1")
+
+
+def test_ranker_request_accepts_single_history_and_candidate_post(app_request):
+    app_request.RankerPredictRequest(
+        history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+        history_author_dids=["author-1", "author-2"],
+        history_liked_at_times=[_liked_at(1), _liked_at(2)],
+        candidate_post_embeddings=[7.0, 8.0, 9.0],
+        candidate_author_dids="candidate-author",
+    )
+
+
+def test_ranker_request_accepts_batched_histories_and_candidates(app_request):
+    app_request.RankerPredictRequest(
+        history_embeddings=[[], [[1.0, 2.0, 3.0]], [[]]],
+        history_author_dids=[[], ["author-1"], []],
+        history_liked_at_times=[[], [_liked_at(1)], []],
+        candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0], [13.0, 14.0, 15.0]],
+        candidate_author_dids=["candidate-1", "candidate-2", "candidate-3"],
+    )
+
+
+def test_ranker_request_rejects_naive_liked_at_times(app_request):
+    with pytest.raises(ValueError):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[1.0, 2.0, 3.0]],
+            history_liked_at_times=[datetime(2026, 1, 1, 12)],
+            candidate_post_embeddings=[7.0, 8.0, 9.0],
+        )
+
+
+def test_ranker_request_rejects_single_history_liked_at_times_shape_mismatch(app_request):
+    with pytest.raises(ValueError, match="must be a list of datetimes"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[1.0, 2.0, 3.0]],
+            history_liked_at_times=[[_liked_at(1)]],
+            candidate_post_embeddings=[7.0, 8.0, 9.0],
+        )
+
+
+def test_ranker_request_rejects_batched_history_liked_at_times_shape_mismatch(app_request):
+    with pytest.raises(ValueError, match="must be a list of list of datetimes"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
+            history_liked_at_times=[_liked_at(1), _liked_at(2)],
+            candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        )
+
+
+def test_ranker_request_rejects_history_and_liked_at_batch_mismatch(app_request):
+    with pytest.raises(ValueError, match="must match history liked at times batch size"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
+            history_liked_at_times=[[_liked_at(1)]],
+            candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        )
+
+
+def test_ranker_request_rejects_history_and_candidate_post_batch_mismatch(app_request):
+    with pytest.raises(ValueError, match="must match candidate post batch size"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
+            history_liked_at_times=[[_liked_at(1)], [_liked_at(2)]],
+            candidate_post_embeddings=[[7.0, 8.0, 9.0]],
+        )
+
+
+def test_ranker_request_rejects_candidate_author_dids_shape_mismatch(app_request):
+    with pytest.raises(ValueError, match="same length as the batch"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
+            history_liked_at_times=[[_liked_at(1)], [_liked_at(2)]],
+            candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+            candidate_author_dids="candidate-author",
+        )
 
 
 def test_author_idx_map_loads_from_configured_uri(tmp_path, monkeypatch):
@@ -672,6 +770,141 @@ def test_predict_with_entry_post_tower_defaults_missing_author_dids_to_unknown(a
     assert out.tolist() == [[2.0], [3.0]]
 
 
+def test_get_time_deltas_hours_handles_single_and_batched_times(app_request, monkeypatch):
+    _freeze_app_now(app_request, monkeypatch)
+
+    assert app_request._get_time_deltas_hours([_liked_at(1), _liked_at(2.5)]) == [1.0, 2.5]
+    assert app_request._get_time_deltas_hours([[], [_liked_at(3)]]) == [[], [3.0]]
+
+
+def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_inputs(app_request, monkeypatch):
+    captured = {}
+    _freeze_app_now(app_request, monkeypatch)
+
+    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None):
+        captured["pad_args"] = {
+            "history_embeddings": history_embeddings,
+            "max_history_len": max_history_len,
+            "embed_dim": embed_dim,
+            "author_indices": author_indices,
+            "time_deltas_hours": time_deltas_hours,
+        }
+        return (
+            [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
+            [[True, False]],
+            [[12, 0]],
+            [[2.0, 0.0]],
+        )
+
+    def ranker_model(
+        history_embeddings,
+        history_mask,
+        history_time_deltas_hours,
+        candidate_post_embeddings,
+        history_author_indices,
+        candidate_author_indices,
+    ):
+        captured["model_inputs"] = {
+            "history_embeddings": history_embeddings.value,
+            "history_mask": history_mask.value,
+            "history_time_deltas_hours": history_time_deltas_hours.value,
+            "candidate_post_embeddings": candidate_post_embeddings.value,
+            "history_author_indices": history_author_indices.value,
+            "candidate_author_indices": candidate_author_indices.value,
+        }
+        return app_request.torch.Tensor([[0.75]])
+
+    monkeypatch.setattr(app_request, "get_padded_embedding_history_and_mask_batched", fake_pad)
+    _set_author_idx_map(app_request, monkeypatch, {"history-author": 12, "candidate-author": 13}, name="ranker")
+
+    entry = app_request.LoadedModel(model_type="ranker")
+    entry.module = ranker_model
+    entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 6
+
+    req = app_request.RankerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+        history_author_dids=["history-author", "unknown-history-author"],
+        history_liked_at_times=[_liked_at(2), _liked_at(4)],
+        candidate_post_embeddings=[3.0, 2.0, 1.0],
+        candidate_author_dids="candidate-author",
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["pad_args"]["history_embeddings"] == [[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]]
+    assert captured["pad_args"]["max_history_len"] == entry.max_history_len
+    assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_CONTENT_EMBED_DIM
+    assert captured["pad_args"]["author_indices"] == [12, app_request.AUTHOR_UNK_IDX]
+    assert captured["pad_args"]["time_deltas_hours"] == [2.0, 4.0]
+    assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
+    assert captured["model_inputs"]["history_mask"] == [[True, False]]
+    assert captured["model_inputs"]["history_time_deltas_hours"] == [[2.0, 0.0]]
+    assert captured["model_inputs"]["candidate_post_embeddings"] == [[3.0, 2.0, 1.0]]
+    assert captured["model_inputs"]["history_author_indices"] == [[12, 0]]
+    assert captured["model_inputs"]["candidate_author_indices"] == [13]
+    assert out.tolist() == [[0.75]]
+
+
+def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
+    captured = {}
+    _freeze_app_now(app_request, monkeypatch)
+    monkeypatch.setattr(app_request, "_author_idx_maps", {})
+
+    def ranker_model(
+        history_embeddings,
+        history_mask,
+        history_time_deltas_hours,
+        candidate_post_embeddings,
+        history_author_indices,
+        candidate_author_indices,
+    ):
+        captured["history_embeddings"] = history_embeddings.value
+        captured["history_mask"] = history_mask.value
+        captured["history_time_deltas_hours"] = history_time_deltas_hours.value
+        captured["candidate_post_embeddings"] = candidate_post_embeddings.value
+        captured["history_author_indices"] = history_author_indices.value
+        captured["candidate_author_indices"] = candidate_author_indices.value
+        return app_request.torch.Tensor([[0.25]])
+
+    entry = app_request.LoadedModel(model_type="ranker")
+    entry.module = ranker_model
+    entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 3
+
+    req = app_request.RankerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0]],
+        history_liked_at_times=[_liked_at(1.5)],
+        candidate_post_embeddings=[3.0, 2.0, 1.0],
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["history_embeddings"] == [[[9.0, 8.0, 7.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]
+    assert captured["history_mask"] == [[True, False, False]]
+    assert captured["history_time_deltas_hours"] == [[1.5, 0.0, 0.0]]
+    assert captured["candidate_post_embeddings"] == [[3.0, 2.0, 1.0]]
+    assert captured["history_author_indices"] == [[app_request.AUTHOR_UNK_IDX, 0, 0]]
+    assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX]
+    assert out.tolist() == [[0.25]]
+
+
+def test_predict_with_entry_ranker_rejects_liked_at_length_mismatch(app_request, monkeypatch):
+    _freeze_app_now(app_request, monkeypatch)
+
+    entry = app_request.LoadedModel(model_type="ranker")
+    entry.module = Mock()
+    entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 3
+
+    req = app_request.RankerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+        history_liked_at_times=[_liked_at(1)],
+        candidate_post_embeddings=[3.0, 2.0, 1.0],
+    )
+
+    with pytest.raises(ValueError, match="Length of time_deltas_hours must match history length"):
+        app_request._predict_with_entry(entry, req)
+
+
 def test_predict_with_entry_rejects_request_type_mismatch(app_request):
     entry = app_request.LoadedModel(model_type="user-tower")
     entry.module = Mock()
@@ -684,6 +917,21 @@ def test_predict_with_entry_rejects_request_type_mismatch(app_request):
 
     assert exc_info.value.status_code == 422
     assert "expects a user-tower request body" in str(exc_info.value.detail)
+
+
+def test_predict_with_entry_rejects_ranker_request_type_mismatch(app_request):
+    entry = app_request.LoadedModel(model_type="ranker")
+    entry.module = Mock()
+    entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 6
+
+    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
+
+    with pytest.raises(app_request.HTTPException) as exc_info:
+        app_request._predict_with_entry(entry, req)
+
+    assert exc_info.value.status_code == 422
+    assert "expects a ranker request body" in str(exc_info.value.detail)
 
 
 def test_require_ready_raises_503_when_model_not_loaded(app_request, monkeypatch):
