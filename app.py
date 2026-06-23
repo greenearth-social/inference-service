@@ -100,6 +100,7 @@ def _configured_model_types() -> list[ModelType]:
 
 
 def _required_author_idx_map_names(model_types: list[ModelType]) -> list[AuthorIdxType]:
+    # The two tower models share one author vocabulary; the ranker is trained with its own.
     names: list[AuthorIdxType] = []
     if "post-tower" in model_types or "user-tower" in model_types:
         names.append("two-tower")
@@ -119,6 +120,7 @@ def _author_idx_map_env_var(author_idx_map_name: AuthorIdxType) -> str:
 
 
 def _get_max_history_len(model_type: ModelType) -> int | None:
+    # Only history-sequence models need a max history length. The post tower scores one post at a time.
     match model_type:
         case "user-tower":
             env_var_name = "GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"
@@ -220,7 +222,7 @@ def _validate_user_history(
     history_embeddings: list[list[float]] | list[list[list[float]]],
     history_author_dids: list[str] | list[list[str]] | None
 ) -> int:
-    """Returns batch dimension size"""
+    """Validate history embeddings/authors and return the inferred batch size."""
     match shape:
         case "single_empty":
             if history_author_dids is None:
@@ -262,7 +264,7 @@ def _validate_liked_at_times(
     shape: HistoryEmbeddingsShape,
     history_liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]]
 ) -> int:
-    """Confirm that the liked-at times have the same shape and return batch size"""
+    """Validate liked-at time nesting and return the inferred batch size."""
     match shape:
         case "single_empty":
             if len(history_liked_at_times) > 0:
@@ -291,6 +293,7 @@ def _validate_post_embeddings(
     pe: list[float] | list[list[float]],
     author_dids: str | list[str] | None,
 ) -> int:
+        """Validate post-tower inputs or ranker candidate-post inputs and return batch size."""
         if not isinstance(pe, list) or len(pe) == 0:
             raise ValueError("post embeddings must be a non-empty list")
 
@@ -540,6 +543,7 @@ def _ensure_author_idx_maps_loaded() -> None:
             if _author_idx_maps_initialized and all(_author_idx_map_ready(name) for name in required_author_idx_map_names):
                 return
 
+            # Only the maps required by configured models are mandatory.
             for author_idx_map_name in required_author_idx_map_names:
                 if author_idx_map_name not in _author_idx_maps:
                     env_var = _author_idx_map_env_var(author_idx_map_name)
@@ -822,6 +826,7 @@ def _get_author_indices_from_dids(
     author_dids: str | list[str] | list[list[str]],
     author_idx_map_name: str,
 ) -> list[int] | list[list[int]]:
+    # Empty histories have no authors to map, so they should not require the map to be loaded.
     if isinstance(author_dids, list) and len(author_dids) == 0:
         return []
     if author_idx_map_name not in _author_idx_maps or _author_idx_maps[author_idx_map_name] is None:
@@ -874,6 +879,7 @@ def _get_target_author_indices_for_ranker_request(
 def _get_time_deltas_hours(
     liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]],
 ) -> list[float] | list[list[float]]:
+    """Convert liked-at datetimes into the ranker's elapsed-hours feature."""
     now = datetime.now(timezone.utc)
 
     if not isinstance(liked_at_times, list):
@@ -915,7 +921,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     if req.history_author_dids is not None
                     else None
                 )
-                # take raw list inputs and pad/truncate:
+                # Pad/truncate the raw history inputs into the fixed sequence tensors expected by TorchScript.
                 if entry.max_history_len is None:
                     raise ValueError(f"No history length env variable set for model {entry.model_type}!")
                 history_embeddings_padded, history_mask_padded, author_indices_padded, _ = get_padded_embedding_history_and_mask_batched(
@@ -957,7 +963,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 if entry.max_history_len is None:
                     raise ValueError(f"No history length env variable set for model {entry.model_type}!")
 
-                # history posts inputs
+                # Build history-side ranker features together so embeddings, masks, authors, and time deltas stay aligned.
                 history_author_indices_list = (
                     _get_author_indices_from_dids(req.history_author_dids, "ranker")
                     if req.history_author_dids is not None
@@ -982,7 +988,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 history_author_indices = _tensor_from_nested_list("author_indices", history_author_indices_padded, torch.int64, entry.device)
                 history_time_deltas_hours = _tensor_from_nested_list("time_deltas_hours", history_time_deltas_hours_padded, DTYPE_FLOAT, entry.device)
 
-                # candidate post inputs
+                # Candidate-side ranker features are single post vectors, with an optional batch dimension.
                 candidate_post_embeddings = _tensor_from_nested_list(
                     "candidate_post_embeddings", req.candidate_post_embeddings, DTYPE_FLOAT, entry.device
                 )
