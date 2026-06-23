@@ -62,6 +62,9 @@ def _install_stub_modules() -> None:
             def tolist(self):
                 return self.value
 
+            def __getitem__(self, idx):
+                return DummyTensor(self.value[idx])
+
         class DummyDevice:
             def __init__(self, kind):
                 self.type = kind
@@ -432,14 +435,35 @@ def test_ranker_request_accepts_single_history_and_candidate_post(app_request):
     )
 
 
-def test_ranker_request_accepts_batched_histories_and_candidates(app_request):
+def test_ranker_request_accepts_single_history_and_multiple_candidate_posts(app_request):
     app_request.RankerPredictRequest(
-        history_embeddings=[[], [[1.0, 2.0, 3.0]], [[]]],
-        history_author_dids=[[], ["author-1"], []],
-        history_liked_at_times=[[], [_liked_at(1)], []],
-        candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0], [13.0, 14.0, 15.0]],
-        candidate_author_dids=["candidate-1", "candidate-2", "candidate-3"],
+        history_embeddings=[[1.0, 2.0, 3.0]],
+        history_author_dids=["author-1"],
+        history_liked_at_times=[_liked_at(1)],
+        candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        candidate_author_dids=["candidate-1", "candidate-2"],
     )
+
+
+def test_ranker_request_accepts_single_empty_history_and_multiple_candidate_posts(app_request):
+    app_request.RankerPredictRequest(
+        history_embeddings=[],
+        history_author_dids=[],
+        history_liked_at_times=[],
+        candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        candidate_author_dids=["candidate-1", "candidate-2"],
+    )
+
+
+def test_ranker_request_rejects_batched_histories(app_request):
+    with pytest.raises(ValueError, match="single user history"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[], [[1.0, 2.0, 3.0]], [[]]],
+            history_author_dids=[[], ["author-1"], []],
+            history_liked_at_times=[[], [_liked_at(1)], []],
+            candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+            candidate_author_dids=["candidate-1", "candidate-2"],
+        )
 
 
 def test_ranker_request_rejects_naive_liked_at_times(app_request):
@@ -461,7 +485,7 @@ def test_ranker_request_rejects_single_history_liked_at_times_shape_mismatch(app
 
 
 def test_ranker_request_rejects_batched_history_liked_at_times_shape_mismatch(app_request):
-    with pytest.raises(ValueError, match="must be a list of list of datetimes"):
+    with pytest.raises(ValueError, match="single user history"):
         app_request.RankerPredictRequest(
             history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
             history_liked_at_times=[_liked_at(1), _liked_at(2)],
@@ -470,7 +494,7 @@ def test_ranker_request_rejects_batched_history_liked_at_times_shape_mismatch(ap
 
 
 def test_ranker_request_rejects_history_and_liked_at_batch_mismatch(app_request):
-    with pytest.raises(ValueError, match="must match history liked at times batch size"):
+    with pytest.raises(ValueError, match="single user history"):
         app_request.RankerPredictRequest(
             history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
             history_liked_at_times=[[_liked_at(1)]],
@@ -479,7 +503,7 @@ def test_ranker_request_rejects_history_and_liked_at_batch_mismatch(app_request)
 
 
 def test_ranker_request_rejects_history_and_candidate_post_batch_mismatch(app_request):
-    with pytest.raises(ValueError, match="must match candidate post batch size"):
+    with pytest.raises(ValueError, match="single user history"):
         app_request.RankerPredictRequest(
             history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
             history_liked_at_times=[[_liked_at(1)], [_liked_at(2)]],
@@ -490,8 +514,8 @@ def test_ranker_request_rejects_history_and_candidate_post_batch_mismatch(app_re
 def test_ranker_request_rejects_candidate_author_dids_shape_mismatch(app_request):
     with pytest.raises(ValueError, match="same length as the batch"):
         app_request.RankerPredictRequest(
-            history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
-            history_liked_at_times=[[_liked_at(1)], [_liked_at(2)]],
+            history_embeddings=[[1.0, 2.0, 3.0]],
+            history_liked_at_times=[_liked_at(1)],
             candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
             candidate_author_dids="candidate-author",
         )
@@ -796,29 +820,31 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
             [[2.0, 0.0]],
         )
 
-    def ranker_model(
-        history_embeddings,
-        history_mask,
-        history_time_deltas_hours,
-        candidate_post_embeddings,
-        history_author_indices,
-        candidate_author_indices,
-    ):
-        captured["model_inputs"] = {
-            "history_embeddings": history_embeddings.value,
-            "history_mask": history_mask.value,
-            "history_time_deltas_hours": history_time_deltas_hours.value,
-            "candidate_post_embeddings": candidate_post_embeddings.value,
-            "history_author_indices": history_author_indices.value,
-            "candidate_author_indices": candidate_author_indices.value,
-        }
-        return app_request.torch.Tensor([[0.75]])
+    class RankerModel:
+        def score_candidate_matrix(
+            self,
+            history_embeddings,
+            history_mask,
+            history_time_deltas_hours,
+            candidate_post_embeddings,
+            history_author_indices,
+            candidate_author_indices,
+        ):
+            captured["model_inputs"] = {
+                "history_embeddings": history_embeddings.value,
+                "history_mask": history_mask.value,
+                "history_time_deltas_hours": history_time_deltas_hours.value,
+                "candidate_post_embeddings": candidate_post_embeddings.value,
+                "history_author_indices": history_author_indices.value,
+                "candidate_author_indices": candidate_author_indices.value,
+            }
+            return app_request.torch.Tensor([[0.75, 0.5]])
 
     monkeypatch.setattr(app_request, "get_padded_embedding_history_and_mask_batched", fake_pad)
     _set_author_idx_map(app_request, monkeypatch, {"history-author": 12, "candidate-author": 13}, name="ranker")
 
     entry = app_request.LoadedModel(model_type="ranker")
-    entry.module = ranker_model
+    entry.module = RankerModel()
     entry.device = app_request.torch.device("cpu")
     entry.max_history_len = 6
 
@@ -826,8 +852,8 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
         history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
         history_author_dids=["history-author", "unknown-history-author"],
         history_liked_at_times=[_liked_at(2), _liked_at(4)],
-        candidate_post_embeddings=[3.0, 2.0, 1.0],
-        candidate_author_dids="candidate-author",
+        candidate_post_embeddings=[[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]],
+        candidate_author_dids=["candidate-author", "unknown-candidate-author"],
     )
     out = app_request._predict_with_entry(entry, req)
 
@@ -839,10 +865,10 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
     assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
     assert captured["model_inputs"]["history_mask"] == [[True, False]]
     assert captured["model_inputs"]["history_time_deltas_hours"] == [[2.0, 0.0]]
-    assert captured["model_inputs"]["candidate_post_embeddings"] == [[3.0, 2.0, 1.0]]
+    assert captured["model_inputs"]["candidate_post_embeddings"] == [[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]]
     assert captured["model_inputs"]["history_author_indices"] == [[12, 0]]
-    assert captured["model_inputs"]["candidate_author_indices"] == [13]
-    assert out.tolist() == [[0.75]]
+    assert captured["model_inputs"]["candidate_author_indices"] == [13, app_request.AUTHOR_UNK_IDX]
+    assert out.tolist() == [0.75, 0.5]
 
 
 def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
@@ -850,24 +876,26 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
     _freeze_app_now(app_request, monkeypatch)
     monkeypatch.setattr(app_request, "_author_idx_maps", {})
 
-    def ranker_model(
-        history_embeddings,
-        history_mask,
-        history_time_deltas_hours,
-        candidate_post_embeddings,
-        history_author_indices,
-        candidate_author_indices,
-    ):
-        captured["history_embeddings"] = history_embeddings.value
-        captured["history_mask"] = history_mask.value
-        captured["history_time_deltas_hours"] = history_time_deltas_hours.value
-        captured["candidate_post_embeddings"] = candidate_post_embeddings.value
-        captured["history_author_indices"] = history_author_indices.value
-        captured["candidate_author_indices"] = candidate_author_indices.value
-        return app_request.torch.Tensor([[0.25]])
+    class RankerModel:
+        def score_candidate_matrix(
+            self,
+            history_embeddings,
+            history_mask,
+            history_time_deltas_hours,
+            candidate_post_embeddings,
+            history_author_indices,
+            candidate_author_indices,
+        ):
+            captured["history_embeddings"] = history_embeddings.value
+            captured["history_mask"] = history_mask.value
+            captured["history_time_deltas_hours"] = history_time_deltas_hours.value
+            captured["candidate_post_embeddings"] = candidate_post_embeddings.value
+            captured["history_author_indices"] = history_author_indices.value
+            captured["candidate_author_indices"] = candidate_author_indices.value
+            return app_request.torch.Tensor([[0.25]])
 
     entry = app_request.LoadedModel(model_type="ranker")
-    entry.module = ranker_model
+    entry.module = RankerModel()
     entry.device = app_request.torch.device("cpu")
     entry.max_history_len = 3
 
@@ -884,7 +912,7 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
     assert captured["candidate_post_embeddings"] == [[3.0, 2.0, 1.0]]
     assert captured["history_author_indices"] == [[app_request.AUTHOR_UNK_IDX, 0, 0]]
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX]
-    assert out.tolist() == [[0.25]]
+    assert out.tolist() == [0.25]
 
 
 def test_predict_with_entry_ranker_rejects_liked_at_length_mismatch(app_request, monkeypatch):
@@ -1053,6 +1081,50 @@ def test_init_registry_sets_ranker_metadata_from_manifest(tmp_path):
     assert app._models_init_error is None
     assert app._models["ranker"].model_uuid == "ranker-model-ghi789"
     assert app._models["ranker"].configured_model_uri == "gs://fake-bucket/ranker.pt"
+
+
+def test_load_entry_accepts_ranker_with_matrix_scorer(monkeypatch):
+    app = _load_app_module("inference_service_ranker_matrix_load_tests", model_types="ranker")
+
+    class MatrixRanker:
+        def __init__(self):
+            self.eval_called = False
+
+        def eval(self):
+            self.eval_called = True
+            return self
+
+        def score_candidate_matrix(self, *args):
+            return app.torch.Tensor([[0.5]])
+
+    ranker = MatrixRanker()
+    monkeypatch.setattr(app, "_resolve_model_file", lambda _entry: ("ranker.pt", "ranker-id"))
+    monkeypatch.setattr(app.torch.jit, "load", lambda *args, **kwargs: ranker)
+
+    entry = app.LoadedModel(model_type="ranker")
+    app._load_entry(entry)
+
+    assert entry.module is ranker
+    assert ranker.eval_called is True
+    assert entry.max_history_len == app._get_max_history_len("ranker")
+
+
+def test_load_entry_rejects_ranker_without_matrix_scorer(monkeypatch):
+    app = _load_app_module("inference_service_ranker_forward_only_load_tests", model_types="ranker")
+
+    class ForwardOnlyRanker:
+        def eval(self):
+            return self
+
+        def __call__(self, *args):
+            return app.torch.Tensor([0.5])
+
+    monkeypatch.setattr(app, "_resolve_model_file", lambda _entry: ("ranker.pt", "ranker-id"))
+    monkeypatch.setattr(app.torch.jit, "load", lambda *args, **kwargs: ForwardOnlyRanker())
+
+    entry = app.LoadedModel(model_type="ranker")
+    with pytest.raises(RuntimeError, match="score_candidate_matrix"):
+        app._load_entry(entry)
 
 
 def test_init_registry_fails_on_missing_manifest_keys(tmp_path):

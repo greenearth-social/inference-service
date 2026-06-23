@@ -361,6 +361,8 @@ class RankerPredictRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "RankerPredictRequest":
         shape = classify_history_embeddings_shape(self.history_embeddings)
+        if shape == "batched_history":
+            raise ValueError("ranker requests must include a single user history, not batched histories")
         history_batch_size = _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
         history_times_batch_size = _validate_liked_at_times(shape, self.history_liked_at_times)
         if history_batch_size != history_times_batch_size:
@@ -368,9 +370,7 @@ class RankerPredictRequest(BaseModel):
                 f"History batch size ({history_batch_size}) must match history liked at times batch size ({len(self.history_liked_at_times)})"
             )
 
-        post_batch_size = _validate_post_embeddings(self.candidate_post_embeddings, self.candidate_author_dids)
-        if history_batch_size != post_batch_size:
-            raise ValueError(f"History batch size ({history_batch_size}) must match candidate post batch size ({post_batch_size})")
+        _validate_post_embeddings(self.candidate_post_embeddings, self.candidate_author_dids)
         return self
 
 
@@ -646,7 +646,7 @@ def _warmup_entry(entry: LoadedModel) -> None:
             history_liked_at_hour_deltas = torch.zeros((1, entry.max_history_len), dtype=DTYPE_FLOAT, device=device)
             candidate_post_embeddings = torch.zeros((1, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
             candidate_author_indices = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
-            _ = model(
+            _ = model.score_candidate_matrix(
                 history_embeddings, history_mask, history_liked_at_hour_deltas,
                 candidate_post_embeddings, history_author_indices, candidate_author_indices,
             )
@@ -750,6 +750,8 @@ def _load_entry(entry: LoadedModel) -> None:
 
     m = torch.jit.load(model_file, map_location=device)
     m.eval()
+    if entry.model_type == "ranker" and not callable(getattr(m, "score_candidate_matrix", None)):
+        raise RuntimeError("Ranker model artifact must expose score_candidate_matrix")
 
     entry.module = m
     entry.device = device
@@ -997,11 +999,11 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 candidate_author_indices_list = _get_target_author_indices_for_ranker_request(req)
                 candidate_author_indices = _tensor_from_nested_list("candidate_author_dids", candidate_author_indices_list, torch.int64, entry.device)
 
-                y = entry.module(
+                y = entry.module.score_candidate_matrix(
                     history_embeddings, history_mask, history_time_deltas_hours,
                     candidate_post_embeddings, history_author_indices, candidate_author_indices,
                 )
-                return y
+                return y[0]
             case _:
                 assert_never(entry.model_type)
 
