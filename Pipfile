@@ -10,7 +10,7 @@ pydantic = "*"
 clearml = "*"
 google-cloud-storage = "*"
 pyarrow = "*"
-shared = {git = "https://github.com/greenearth-social/engagement-prediction.git", ref = "ba9fa927e1b33796470ab59f2cc3934782aef5f5"}
+shared = {git = "https://github.com/greenearth-social/engagement-prediction.git", ref = "main"}
 
 [dev-packages]
 pytest = "*"

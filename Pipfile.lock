@@ -1184,7 +1184,7 @@
         "shared": {
             "git": "https://github.com/greenearth-social/engagement-prediction.git",
             "markers": "python_version >= '3.5'",
-            "ref": "ba9fa927e1b33796470ab59f2cc3934782aef5f5"
+            "ref": "82aa4c654c6f1886a78dddd7a86206d73a6faad4"
         },
         "six": {
             "hashes": [
