@@ -28,6 +28,7 @@ GE_INFERENCE_RANKER_AUTHOR_MAP_URI="${GE_INFERENCE_RANKER_AUTHOR_MAP_URI:-}"
 GE_INFERENCE_RANKER_MAX_HISTORY_LEN="${GE_INFERENCE_RANKER_MAX_HISTORY_LEN:-}"
 GE_INFERENCE_CONTENT_EMBED_DIM="${GE_INFERENCE_CONTENT_EMBED_DIM:-384}"
 GE_INFERENCE_MAX_BATCH="${GE_INFERENCE_MAX_BATCH:-0}"
+GE_INFERENCE_MODEL_CACHE_DIR="${GE_INFERENCE_MODEL_CACHE_DIR:-/tmp/model_cache}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -294,6 +295,7 @@ GE_INFERENCE_RANKER_AUTHOR_MAP_URI: "$GE_INFERENCE_RANKER_AUTHOR_MAP_URI"
 GE_INFERENCE_RANKER_MAX_HISTORY_LEN: "$GE_INFERENCE_RANKER_MAX_HISTORY_LEN"
 GE_INFERENCE_CONTENT_EMBED_DIM: "$GE_INFERENCE_CONTENT_EMBED_DIM"
 GE_INFERENCE_MAX_BATCH: "$GE_INFERENCE_MAX_BATCH"
+GE_INFERENCE_MODEL_CACHE_DIR: "$GE_INFERENCE_MODEL_CACHE_DIR"
 GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI: "$GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"
 GE_INFERENCE_PREFER_CUDA: "0"
 GE_INFERENCE_WARMUP: "0"
@@ -344,6 +346,7 @@ main() {
     fi
     log_info "Embed dimension: $GE_INFERENCE_CONTENT_EMBED_DIM"
     log_info "Max batch:       $GE_INFERENCE_MAX_BATCH"
+    log_info "Model cache dir: $GE_INFERENCE_MODEL_CACHE_DIR"
 
     validate_config
     generate_requirements
@@ -405,6 +408,10 @@ while [[ $# -gt 0 ]]; do
             GE_INFERENCE_MAX_BATCH="$2"
             shift 2
             ;;
+        --model-cache-dir)
+            GE_INFERENCE_MODEL_CACHE_DIR="$2"
+            shift 2
+            ;;
         --inference-domain)
             GE_INFERENCE_DOMAIN="$2"
             shift 2
@@ -438,6 +445,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --ranker-author-map-uri URI     GCS URI or local path for the ranker author idx parquet map (required with ranker)"
             echo "  --ranker-max-history-len N      Maximum ranker history sequence length (required with ranker)"
             echo "  --max-batch N                   Max batch size allowed for inference"
+            echo "  --model-cache-dir PATH          Local cache dir for downloaded gs:// artifacts"
             echo "  --inference-domain DOMAIN       Custom mapped domain for inference service"
             echo "  --disable-domain-mapping        Skip domain mapping reconciliation"
             echo "  --min-instances N               Minimum Cloud Run instances (default: 1)"
@@ -456,6 +464,7 @@ while [[ $# -gt 0 ]]; do
             echo "  GE_INFERENCE_RANKER_MAX_HISTORY_LEN      Same as --ranker-max-history-len (required with ranker)"
             echo "  GE_INFERENCE_CONTENT_EMBED_DIM           Same as --content-embed-dim (required)"
             echo "  GE_INFERENCE_MAX_BATCH                   Same as --max-batch (optional; 0 = no limit)"
+            echo "  GE_INFERENCE_MODEL_CACHE_DIR             Same as --model-cache-dir"
             echo "  GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI    GCS URI or local path for the two tower author idx parquet map"
             echo "  GE_ENABLE_INFERENCE_DOMAIN_MAPPING       true/false toggle (default: true)"
             echo "  GE_INFERENCE_DOMAIN                      Custom mapped domain"

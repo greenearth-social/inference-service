@@ -27,7 +27,6 @@ from shared.input_data_helpers import (
     get_padded_embedding_history_and_mask_batched,
     classify_history_embeddings_shape,
     HistoryEmbeddingsShape,
-
 )
 
 
