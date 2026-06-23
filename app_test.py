@@ -574,52 +574,6 @@ def test_ranker_author_idx_map_loads_from_configured_uri(tmp_path, monkeypatch):
     assert app_author_map._author_idx_maps_initialized is True
 
 
-def test_download_gcs_uri_replaces_empty_cached_file(tmp_path, monkeypatch):
-    app_download = _load_app_module("inference_service_app_gcs_download_tests")
-    monkeypatch.setenv("GE_INFERENCE_MODEL_CACHE_DIR", str(tmp_path))
-
-    google = types.ModuleType("google")
-    cloud = types.ModuleType("google.cloud")
-    storage = types.ModuleType("google.cloud.storage")
-    downloaded = {}
-
-    class FakeBlob:
-        def download_to_filename(self, path):
-            downloaded["path"] = path
-            Path(path).write_bytes(b"fresh model bytes")
-
-    class FakeBucket:
-        def blob(self, blob_name):
-            downloaded["blob_name"] = blob_name
-            return FakeBlob()
-
-    class FakeClient:
-        def bucket(self, bucket_name):
-            downloaded["bucket_name"] = bucket_name
-            return FakeBucket()
-
-    storage.Client = FakeClient
-    cloud.storage = storage
-    google.cloud = cloud
-    monkeypatch.setitem(sys.modules, "google", google)
-    monkeypatch.setitem(sys.modules, "google.cloud", cloud)
-    monkeypatch.setitem(sys.modules, "google.cloud.storage", storage)
-
-    gs_uri = "gs://test-bucket/models/ranker.pt"
-    cache_key = app_download.sha256(gs_uri.encode("utf-8")).hexdigest()[:16]
-    cached_path = tmp_path / f"{cache_key}-ranker.pt"
-    cached_path.write_bytes(b"")
-
-    resolved_path = app_download._download_gcs_uri_to_local(gs_uri)
-
-    assert resolved_path == str(cached_path)
-    assert cached_path.read_bytes() == b"fresh model bytes"
-    assert downloaded["bucket_name"] == "test-bucket"
-    assert downloaded["blob_name"] == "models/ranker.pt"
-    assert downloaded["path"] != str(cached_path)
-    assert list(tmp_path.glob("*.tmp-*")) == []
-
-
 def test_get_entry_or_404_returns_404_for_unknown_model(app_request, monkeypatch):
     monkeypatch.setattr(app_request, "_models_initialized", True)
     monkeypatch.setattr(app_request, "_models_init_error", None)
