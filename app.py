@@ -292,7 +292,7 @@ def _validate_post_embeddings(
     author_dids: str | list[str] | None,
 ) -> int:
         if not isinstance(pe, list) or len(pe) == 0:
-            raise ValueError("'post_embeddings' must be a non-empty list")
+            raise ValueError("post embeddings must be a non-empty list")
 
         is_batched = isinstance(pe[0], list)
         if is_batched:
@@ -301,26 +301,26 @@ def _validate_post_embeddings(
                 raise ValueError(f"batch too large (max={GE_INFERENCE_MAX_BATCH})")
             d0 = len(batch[0]) if len(batch) > 0 else 0 # type: ignore
             if d0 == 0:
-                raise ValueError("each post_embeddings vector must be non-empty")
+                raise ValueError("each post embeddings vector must be non-empty")
             if not all(isinstance(v, list) and len(v) == d0 for v in batch):
-                raise ValueError("all post_embeddings vectors must have the same length")
+                raise ValueError("all post embeddings vectors must have the same length")
             if GE_INFERENCE_CONTENT_EMBED_DIM and d0 != GE_INFERENCE_CONTENT_EMBED_DIM:
                 raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={d0}")
             if author_dids is None:
                 return len(batch)
             if not isinstance(author_dids, list) or len(author_dids) != len(batch):
-                raise ValueError("when post_embeddings is batched, target_author_dids must be a list of the same length as the batch")
+                raise ValueError("when post embeddings are batched, author dids must be a list of the same length as the batch")
             return len(batch)
         else:
             vec = pe  # type: ignore[assignment]
             if len(vec) == 0:
-                raise ValueError("'post_embeddings' must be non-empty")
+                raise ValueError("post embeddings must be non-empty")
             if GE_INFERENCE_CONTENT_EMBED_DIM and len(vec) != GE_INFERENCE_CONTENT_EMBED_DIM:
                 raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={len(vec)}")
             if author_dids is None:
                 return 1
             if not isinstance(author_dids, str):
-                raise ValueError("target_author_dids must be a single string when post_embeddings is not batched")
+                raise ValueError("author dids must be a single string when post_embeddings is not batched")
             return 1
 
 
@@ -822,7 +822,8 @@ def _get_author_indices_from_dids(
     author_dids: str | list[str] | list[list[str]],
     author_idx_map_name: str,
 ) -> list[int] | list[list[int]]:
-    
+    if isinstance(author_dids, list) and len(author_dids) == 0:
+        return []
     if author_idx_map_name not in _author_idx_maps or _author_idx_maps[author_idx_map_name] is None:
         raise HTTPException(status_code=503, detail="Author idx map not loaded")
     else:
@@ -833,9 +834,7 @@ def _get_author_indices_from_dids(
     if isinstance(author_dids, str):
         return [_get_single_author_idx_from_did(author_dids, author_idx_map)]
     elif isinstance(author_dids, list):
-        if len(author_dids) == 0:
-            return []
-        elif isinstance(author_dids[0], str):
+        if isinstance(author_dids[0], str):
             return [
                 _get_single_author_idx_from_did(did, author_idx_map) # type: ignore
                 for did in author_dids
@@ -985,7 +984,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
 
                 # candidate post inputs
                 candidate_post_embeddings = _tensor_from_nested_list(
-                    "post_embeddings", req.candidate_post_embeddings, DTYPE_FLOAT, entry.device
+                    "candidate_post_embeddings", req.candidate_post_embeddings, DTYPE_FLOAT, entry.device
                 )
                 if candidate_post_embeddings.dim() == 1:
                     candidate_post_embeddings = candidate_post_embeddings.unsqueeze(0) # add a batch dimension of size 1 at the beginning
