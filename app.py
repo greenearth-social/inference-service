@@ -15,9 +15,19 @@ from clearml import Model
 from fastapi import FastAPI, HTTPException, Security, Body
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Discriminator, Tag, model_validator
+from pydantic import (
+    BaseModel,
+    Discriminator,
+    Tag,
+    model_validator,
+    AwareDatetime
+)
 
-from shared.input_data_helpers import get_padded_embedding_history_and_mask_batched, classify_history_embeddings_shape
+from shared.input_data_helpers import (
+    get_padded_embedding_history_and_mask_batched,
+    classify_history_embeddings_shape,
+    HistoryEmbeddingsShape,
+)
 
 
 @asynccontextmanager
@@ -51,17 +61,9 @@ GE_INFERENCE_CONTENT_EMBED_DIM = int(os.getenv("GE_INFERENCE_CONTENT_EMBED_DIM",
 if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
     raise ValueError("Must supply a valid (positive) GE_INFERENCE_CONTENT_EMBED_DIM!")
 
-GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN = int(os.getenv("GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN", "0")) 
-if GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN <= 0:
-    raise ValueError("Must supply a valid (positive) GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN!")
-
 GE_INFERENCE_MAX_BATCH: int | None = int(os.getenv("GE_INFERENCE_MAX_BATCH", "0"))
 if GE_INFERENCE_MAX_BATCH == 0:
     GE_INFERENCE_MAX_BATCH = None
-
-GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI: str = os.getenv("GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI", "")
-if GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI == "":
-    raise ValueError("Must supply a valid GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI!")
 
 DTYPE_FLOAT = torch.float32
 
@@ -71,7 +73,70 @@ AUTHOR_UNK_IDX = 1
 # -------------------------
 # State
 # -------------------------
-ModelType = Literal["user-tower", "post-tower"]
+ModelType = Literal["user-tower", "post-tower", "ranker"]
+AuthorIdxType = Literal["two-tower", "ranker"]
+
+_MODEL_TYPE_VALUES = get_args(ModelType)
+
+
+def _configured_model_types() -> list[ModelType]:
+    models_env = os.getenv("GE_INFERENCE_MODELS", "").strip()
+    if not models_env:
+        raise RuntimeError(
+            "No models configured. Set GE_INFERENCE_MODELS (e.g. 'user-tower,post-tower')."
+        )
+
+    env_model_types = [model_type.strip() for model_type in models_env.split(",")]
+    if len(env_model_types) > len(_MODEL_TYPE_VALUES):
+        raise RuntimeError(f"Too many models configured ({len(env_model_types)}). Max is 3.")
+
+    model_types: list[ModelType] = []
+    for env_model_type in env_model_types:
+        if env_model_type not in _MODEL_TYPE_VALUES:
+            raise RuntimeError(f"Unsupported model type: '{env_model_type}'")
+        model_types.append(env_model_type) # type: ignore[arg-type]
+    return model_types
+
+
+def _required_author_idx_map_names(model_types: list[ModelType]) -> list[AuthorIdxType]:
+    # The two tower models share one author vocabulary; the ranker is trained with its own.
+    names: list[AuthorIdxType] = []
+    if "post-tower" in model_types or "user-tower" in model_types:
+        names.append("two-tower")
+    if "ranker" in model_types:
+        names.append("ranker")
+    return names
+
+
+def _author_idx_map_env_var(author_idx_map_name: AuthorIdxType) -> str:
+    match author_idx_map_name:
+        case "two-tower":
+            return "GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"
+        case "ranker":
+            return "GE_INFERENCE_RANKER_AUTHOR_MAP_URI"
+        case _:
+            assert_never(author_idx_map_name)
+
+
+def _get_max_history_len(model_type: ModelType) -> int | None:
+    # Only history-sequence models need a max history length. The post tower scores one post at a time.
+    match model_type:
+        case "user-tower":
+            env_var_name = "GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"
+        case "ranker":
+            env_var_name = "GE_INFERENCE_RANKER_MAX_HISTORY_LEN"
+        case "post-tower":
+            env_var_name = None
+        case _:
+            assert_never(model_type)
+
+    if env_var_name is None:
+        return None
+    else:
+        max_history_len = int(os.getenv(env_var_name, "0")) 
+        if max_history_len <= 0:
+            raise ValueError(f"Must supply a valid (positive) {env_var_name}!")
+        return max_history_len
 
 
 @dataclass
@@ -86,6 +151,7 @@ class LoadedModel:
     resolved_model_path: str | None = None
     resolved_model_id: str | None = None
     model_uuid: str | None = None
+    max_history_len: int | None = None
 
     load_error: str | None = None
     load_started_at: float | None = None
@@ -97,11 +163,21 @@ _models_initialized = False
 _models_init_error: str | None = None
 _models: dict[str, LoadedModel] = {}
 
-_two_tower_author_idx_by_did: dict[str, int] | None = None
-_two_tower_author_idx_map_load_error: str | None = None
-_two_tower_author_idx_map_load_started_at: float | None = None
-_two_tower_author_idx_map_load_finished_at: float | None = None
-_two_tower_author_idx_map_resolved_path: str | None = None
+
+@dataclass
+class AuthorIdxMap:
+    name: str
+    uri: str
+    idx_by_did: dict[str, int] | None = None
+    load_error: str | None = None
+    load_started_at: float | None = None
+    load_finished_at: float | None = None
+    resolved_path: str | None = None
+
+
+_author_idx_maps_init_error: str | None = None
+_author_idx_maps_initialized = False
+_author_idx_maps: dict[str, AuthorIdxMap] = {}
 
 
 # -------------------------
@@ -140,6 +216,116 @@ def _validate_batched_user_history(history_embeddings: list[list[Any]]) -> list[
     return hist_len_list
 
 
+def _validate_user_history(
+    shape: HistoryEmbeddingsShape,
+    history_embeddings: list[list[float]] | list[list[list[float]]],
+    history_author_dids: list[str] | list[list[str]] | None
+) -> int:
+    """Validate history embeddings/authors and return the inferred batch size."""
+    match shape:
+        case "single_empty":
+            if history_author_dids is None:
+                return 1
+            if not isinstance(history_author_dids, list):
+                raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
+            if len(history_author_dids) != 0:
+                raise ValueError("when 'history_embeddings' is empty, 'history_author_dids' must also be empty")
+            return 1
+        case "single_history":
+            hist_len = _validate_single_user_history(history_embeddings) # type: ignore
+            if history_author_dids is None:
+                return 1
+            if not isinstance(history_author_dids, list):
+                raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
+            if len(history_author_dids) == 0 or isinstance(history_author_dids[0], list):
+                raise ValueError("when 'history_embeddings' is a single history, 'history_author_dids' must be a list of strings, not a list of list of strings")
+            if len(history_author_dids) != hist_len:
+                raise ValueError(f"length of 'history_author_dids' must match history length ({hist_len}) when 'history_embeddings' is a single history")
+            return 1
+        case "batched_history":
+            hist_len_list = _validate_batched_user_history(history_embeddings)
+            if history_author_dids is None:
+                return len(hist_len_list)
+            if not isinstance(history_author_dids, list):
+                raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
+            if len(history_author_dids) == 0 or isinstance(history_author_dids[0], str):
+                raise ValueError("when 'history_embeddings' is batched, 'history_author_dids' must be a list of list of strings, not a list of strings")
+            if len(history_author_dids) != len(hist_len_list):
+                raise ValueError(f"length of 'history_author_dids' must match batch size ({len(hist_len_list)}) when 'history_embeddings' is batched")
+            if not all(len(user_hti) == hist_len for user_hti, hist_len in zip(history_author_dids, hist_len_list)):
+                raise ValueError(f"length of each user's 'history_author_dids' must match that user's history length when 'history_embeddings' is batched")
+            return len(hist_len_list)
+        case _:
+            assert_never(shape)
+
+
+def _validate_liked_at_times(
+    shape: HistoryEmbeddingsShape,
+    history_liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]]
+) -> int:
+    """Validate liked-at time nesting and return the inferred batch size."""
+    match shape:
+        case "single_empty":
+            if len(history_liked_at_times) > 0:
+                if len(history_liked_at_times) > 1:
+                    raise ValueError(f"History embeddings is a single empty entry but liked-at times has multiple entries")
+                if not isinstance(history_liked_at_times[0], list) or len(history_liked_at_times[0]) > 0:
+                    raise ValueError(f"History embeddings is a single empty entry but liked-at times is not empty")
+            return 1
+        case "single_history":
+            if not isinstance(history_liked_at_times, list):
+                raise ValueError("'history_liked_at_times' must be a list")
+            if len(history_liked_at_times) == 0 or isinstance(history_liked_at_times[0], list):
+                raise ValueError("when 'history_embeddings' is a single history, 'history_liked_at_times' must be a list of datetimes, not a list of list of datetimes")
+            return 1
+        case "batched_history":
+            if not isinstance(history_liked_at_times, list):
+                raise ValueError("when 'history_embeddings' is batched, 'history_liked_at_times' must be a list of list of datetimes")
+            if len(history_liked_at_times) == 0 or not isinstance(history_liked_at_times[0], list):
+                raise ValueError("when 'history_embeddings' is batched, 'history_liked_at_times' must be a list of list of datetimes, not a list of datetimes")
+            return len(history_liked_at_times)
+        case _:
+            assert_never(shape)
+
+
+def _validate_post_embeddings(
+    pe: list[float] | list[list[float]],
+    author_dids: str | list[str] | None,
+) -> int:
+        """Validate post-tower inputs or ranker candidate-post inputs and return batch size."""
+        if not isinstance(pe, list) or len(pe) == 0:
+            raise ValueError("post embeddings must be a non-empty list")
+
+        is_batched = isinstance(pe[0], list)
+        if is_batched:
+            batch = pe  # type: ignore[assignment]
+            if GE_INFERENCE_MAX_BATCH and len(batch) > GE_INFERENCE_MAX_BATCH:
+                raise ValueError(f"batch too large (max={GE_INFERENCE_MAX_BATCH})")
+            d0 = len(batch[0]) if len(batch) > 0 else 0 # type: ignore
+            if d0 == 0:
+                raise ValueError("each post embeddings vector must be non-empty")
+            if not all(isinstance(v, list) and len(v) == d0 for v in batch):
+                raise ValueError("all post embeddings vectors must have the same length")
+            if GE_INFERENCE_CONTENT_EMBED_DIM and d0 != GE_INFERENCE_CONTENT_EMBED_DIM:
+                raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={d0}")
+            if author_dids is None:
+                return len(batch)
+            if not isinstance(author_dids, list) or len(author_dids) != len(batch):
+                raise ValueError("when post embeddings are batched, author dids must be a list of the same length as the batch")
+            return len(batch)
+        else:
+            vec = pe  # type: ignore[assignment]
+            if len(vec) == 0:
+                raise ValueError("post embeddings must be non-empty")
+            if GE_INFERENCE_CONTENT_EMBED_DIM and len(vec) != GE_INFERENCE_CONTENT_EMBED_DIM:
+                raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={len(vec)}")
+            if author_dids is None:
+                return 1
+            if not isinstance(author_dids, str):
+                raise ValueError("author dids must be a single string when post_embeddings is not batched")
+            return 1
+
+
 class UserTowerPredictRequest(BaseModel):
     # history_embeddings: [T, D] or [B, T, D]
     history_embeddings: list[list[float]] | list[list[list[float]]]
@@ -147,45 +333,9 @@ class UserTowerPredictRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
-        he = self.history_embeddings
-        shape = classify_history_embeddings_shape(he)
-        author_dids = self.history_author_dids
-
-        match shape:
-            case "single_empty":
-                if author_dids is None:
-                    return self
-                if not isinstance(author_dids, list):
-                    raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
-                if len(author_dids) != 0:
-                    raise ValueError("when 'history_embeddings' is empty, 'history_author_dids' must also be empty")
-                return self
-            case "single_history":
-                hist_len = _validate_single_user_history(he) # type: ignore
-                if author_dids is None:
-                    return self
-                if not isinstance(author_dids, list):
-                    raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
-                if len(author_dids) == 0 or isinstance(author_dids[0], list):
-                    raise ValueError("when 'history_embeddings' is a single history, 'history_author_dids' must be a list of strings, not a list of list of strings")
-                if len(author_dids) != hist_len:
-                    raise ValueError(f"length of 'history_author_dids' must match history length ({hist_len}) when 'history_embeddings' is a single history")
-                return self
-            case "batched_history":
-                hist_len_list = _validate_batched_user_history(he)
-                if author_dids is None:
-                    return self
-                if not isinstance(author_dids, list):
-                    raise ValueError("'history_author_dids' must be a list (of strings or list of list of strings)")
-                if len(author_dids) == 0 or isinstance(author_dids[0], str):
-                    raise ValueError("when 'history_embeddings' is batched, 'history_author_dids' must be a list of list of strings, not a list of strings")
-                if len(author_dids) != len(hist_len_list):
-                    raise ValueError(f"length of 'history_author_dids' must match batch size ({len(hist_len_list)}) when 'history_embeddings' is batched")
-                if not all(len(user_hti) == hist_len for user_hti, hist_len in zip(author_dids, hist_len_list)):
-                    raise ValueError(f"length of each user's 'history_author_dids' must match that user's history length when 'history_embeddings' is batched")
-                return self
-            case _:
-                assert_never(shape)
+        shape = classify_history_embeddings_shape(self.history_embeddings)
+        _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
+        return self
 
 
 class PostTowerPredictRequest(BaseModel):
@@ -195,43 +345,39 @@ class PostTowerPredictRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "PostTowerPredictRequest":
-        pe = self.post_embeddings
-        if not isinstance(pe, list) or len(pe) == 0:
-            raise ValueError("'post_embeddings' must be a non-empty list")
+        _validate_post_embeddings(self.post_embeddings, self.target_author_dids)
+        return self
 
-        author_dids = self.target_author_dids
 
-        is_batched = isinstance(pe[0], list)
-        if is_batched:
-            batch = pe  # type: ignore[assignment]
-            if GE_INFERENCE_MAX_BATCH and len(batch) > GE_INFERENCE_MAX_BATCH:
-                raise ValueError(f"batch too large (max={GE_INFERENCE_MAX_BATCH})")
-            d0 = len(batch[0]) if len(batch) > 0 else 0 # type: ignore
-            if d0 == 0:
-                raise ValueError("each post_embeddings vector must be non-empty")
-            if not all(isinstance(v, list) and len(v) == d0 for v in batch):
-                raise ValueError("all post_embeddings vectors must have the same length")
-            if GE_INFERENCE_CONTENT_EMBED_DIM and d0 != GE_INFERENCE_CONTENT_EMBED_DIM:
-                raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={d0}")
-            if author_dids is None:
-                return self
-            if not isinstance(author_dids, list) or len(author_dids) != len(batch):
-                raise ValueError("when post_embeddings is batched, target_author_dids must be a list of the same length as the batch")
-        else:
-            vec = pe  # type: ignore[assignment]
-            if len(vec) == 0:
-                raise ValueError("'post_embeddings' must be non-empty")
-            if GE_INFERENCE_CONTENT_EMBED_DIM and len(vec) != GE_INFERENCE_CONTENT_EMBED_DIM:
-                raise ValueError(f"expected D={GE_INFERENCE_CONTENT_EMBED_DIM}, got D={len(vec)}")
-            if author_dids is None:
-                return self
-            if not isinstance(author_dids, str):
-                raise ValueError("target_author_dids must be a single string when post_embeddings is not batched")
+class RankerPredictRequest(BaseModel):
+    # history_embeddings: [T, D] or [B, T, D]
+    history_embeddings: list[list[float]] | list[list[list[float]]]
+    history_author_dids: list[str] | list[list[str]] | None = None
+    history_liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]]
+    # candidate_post_embeddings: [D] or [B, D]
+    candidate_post_embeddings: list[float] | list[list[float]]
+    candidate_author_dids: str | list[str] | None = None
+
+    @model_validator(mode="after")
+    def _validate_post_inputs(self) -> "RankerPredictRequest":
+        shape = classify_history_embeddings_shape(self.history_embeddings)
+        if shape == "batched_history":
+            raise ValueError("ranker requests must include a single user history, not batched histories")
+        history_batch_size = _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
+        history_times_batch_size = _validate_liked_at_times(shape, self.history_liked_at_times)
+        if history_batch_size != history_times_batch_size:
+            raise ValueError(
+                f"History batch size ({history_batch_size}) must match history liked at times batch size ({len(self.history_liked_at_times)})"
+            )
+
+        _validate_post_embeddings(self.candidate_post_embeddings, self.candidate_author_dids)
         return self
 
 
 def _predict_request_discriminator(value: Any) -> str:
     if isinstance(value, dict):
+        if "history_embeddings" in value and "candidate_post_embeddings" in value:
+            return "ranker"
         if "post_embeddings" in value:
             return "post-tower"
         if "history_embeddings" in value:
@@ -240,7 +386,9 @@ def _predict_request_discriminator(value: Any) -> str:
 
 
 PredictRequest = Annotated[
-    Annotated[UserTowerPredictRequest, Tag("user-tower")] | Annotated[PostTowerPredictRequest, Tag("post-tower")],
+    Annotated[UserTowerPredictRequest, Tag("user-tower")] | 
+    Annotated[PostTowerPredictRequest, Tag("post-tower")] |
+    Annotated[RankerPredictRequest, Tag("ranker")],
     Discriminator(_predict_request_discriminator),
 ]
 
@@ -296,7 +444,7 @@ def _download_gcs_uri_to_local(gs_uri: str) -> str:
 
 
 def _load_manifest(uri: str) -> dict:
-    """Load the two_tower_serving_manifest.json from a local path or GCS URI."""
+    """Load the {model_type}_serving_manifest.json from a local path or GCS URI."""
     import json
     path = _download_gcs_uri_to_local(uri) if uri.startswith("gs://") else uri
     with open(path) as f:
@@ -345,43 +493,73 @@ def _load_author_idx_map_from_parquet(path: str) -> dict[str, int]:
     return author_idx_by_did
 
 
-def _ensure_two_tower_author_idx_map_loaded() -> None:
-    global _two_tower_author_idx_by_did, _two_tower_author_idx_map_load_error
-    global _two_tower_author_idx_map_load_started_at, _two_tower_author_idx_map_load_finished_at, _two_tower_author_idx_map_resolved_path
+def _load_single_author_idx_map(author_idx_map: AuthorIdxMap) -> None:
+    try:  
+        if author_idx_map.idx_by_did is not None:
+            return
+        if author_idx_map.load_started_at is not None and author_idx_map.load_finished_at is None:
+            return
+        
+        author_idx_map.load_started_at = time.time()
+        author_idx_map.resolved_path = _resolve_author_idx_map_file(author_idx_map.uri)
+        author_idx_map.idx_by_did = _load_author_idx_map_from_parquet(author_idx_map.resolved_path)
+        author_idx_map.load_error = None
+        logger.info(
+            "%s author idx map loaded | source=%s | path=%s | entries=%s",
+            author_idx_map.name,
+            author_idx_map.uri,
+            author_idx_map.resolved_path,
+            len(author_idx_map.idx_by_did),
+        )
+    except Exception as e:
+        author_idx_map.idx_by_did = None
+        author_idx_map.load_error = str(e)
+        logger.exception(
+            "%s author idx map load failed | source=%s | error=%s",
+            author_idx_map.name,
+            author_idx_map.uri,
+            e
+        )
+    finally:
+        author_idx_map.load_finished_at = time.time()
 
-    if _two_tower_author_idx_by_did is not None:
-        return
+
+def _author_idx_map_ready(author_idx_map_name: AuthorIdxType) -> bool:
+    author_idx_map = _author_idx_maps.get(author_idx_map_name)
+    return (
+        author_idx_map is not None and
+        author_idx_map.idx_by_did is not None and
+        author_idx_map.load_error is None
+    )
+
+
+def _ensure_author_idx_maps_loaded() -> None:
+    global _author_idx_maps, _author_idx_maps_initialized, _author_idx_maps_init_error
 
     with _models_lock:
-        if _two_tower_author_idx_by_did is not None:
-            return
-        if _two_tower_author_idx_map_load_started_at is not None and _two_tower_author_idx_map_load_finished_at is None:
-            return
-
-        _two_tower_author_idx_map_load_started_at = time.time()
         try:
-            resolved_path = _resolve_author_idx_map_file(GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI)
-            _two_tower_author_idx_by_did = _load_author_idx_map_from_parquet(resolved_path)
-            _two_tower_author_idx_map_resolved_path = resolved_path
-            _two_tower_author_idx_map_load_error = None
-            logger.info(
-                "Author idx map loaded | source=%s | path=%s | entries=%s",
-                GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
-                resolved_path,
-                len(_two_tower_author_idx_by_did),
-            )
+            required_author_idx_map_names = _required_author_idx_map_names(_configured_model_types())
+            if _author_idx_maps_initialized and all(_author_idx_map_ready(name) for name in required_author_idx_map_names):
+                return
+
+            # Only the maps required by configured models are mandatory.
+            for author_idx_map_name in required_author_idx_map_names:
+                if author_idx_map_name not in _author_idx_maps:
+                    env_var = _author_idx_map_env_var(author_idx_map_name)
+                    author_idx_map_uri = os.getenv(env_var, "").strip()
+                    if author_idx_map_uri == "":
+                        raise ValueError(f"Must supply a valid {env_var}!")
+
+                    _author_idx_maps[author_idx_map_name] = AuthorIdxMap(name=author_idx_map_name, uri=author_idx_map_uri)
+
+                _load_single_author_idx_map(_author_idx_maps[author_idx_map_name])
+
+            _author_idx_maps_init_error = None
+            _author_idx_maps_initialized = all(_author_idx_map_ready(name) for name in required_author_idx_map_names)
         except Exception as e:
-            _two_tower_author_idx_by_did = None
-            _two_tower_author_idx_map_load_error = str(e)
-            logger.exception("Author idx map load failed | source=%s | error=%s", GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI, e)
-        finally:
-            _two_tower_author_idx_map_load_finished_at = time.time()
-
-
-def _validate_model_type(model_type: str) -> ModelType:
-    if model_type in get_args(ModelType):
-        return model_type # type: ignore[return-value]
-    raise RuntimeError(f"Unsupported model type: '{model_type}'")
+            _author_idx_maps_init_error = str(e)
+            _author_idx_maps_initialized = False
+            logger.exception("Author idx map init failed: %s", e)
 
 
 def _tensor_from_nested_list(name: str, value: Any, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
@@ -445,12 +623,33 @@ def _warmup_entry(entry: LoadedModel) -> None:
         if entry.model_type == "user-tower":
             if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
                 return
+            if entry.max_history_len is None:
+                return
             history_embeddings = torch.zeros(
-                (1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
+                (1, entry.max_history_len, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
             )
-            history_mask = torch.ones((1, GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN), dtype=torch.bool, device=device)
-            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN], dtype=torch.int64, device=device)
+            history_mask = torch.ones((1, entry.max_history_len), dtype=torch.bool, device=device)
+            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * entry.max_history_len], dtype=torch.int64, device=device)
             _ = model(history_embeddings, history_mask, history_author_indices)
+            return
+        
+        if entry.model_type == "ranker":
+            if GE_INFERENCE_CONTENT_EMBED_DIM <= 0:
+                return
+            if entry.max_history_len is None:
+                return
+            history_embeddings = torch.zeros(
+                (1, entry.max_history_len, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device
+            )
+            history_mask = torch.ones((1, entry.max_history_len), dtype=torch.bool, device=device)
+            history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * entry.max_history_len], dtype=torch.int64, device=device)
+            history_liked_at_hour_deltas = torch.zeros((1, entry.max_history_len), dtype=DTYPE_FLOAT, device=device)
+            candidate_post_embeddings = torch.zeros((1, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
+            candidate_author_indices = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
+            _ = model.score_candidate_matrix(
+                history_embeddings, history_mask, history_liked_at_hour_deltas,
+                candidate_post_embeddings, history_author_indices, candidate_author_indices,
+            )
             return
 
 
@@ -465,6 +664,7 @@ def _init_registry() -> None:
 
         try:
             models: dict[str, LoadedModel] = {}
+            configured_model_types = _configured_model_types()
 
             two_tower_manifest_uri = os.getenv("GE_INFERENCE_TWO_TOWER_MANIFEST_URI", "").strip()
             if not two_tower_manifest_uri:
@@ -473,32 +673,37 @@ def _init_registry() -> None:
                     "the two_tower_serving_manifest.json produced by training."
                 )
 
-            manifest = _load_manifest(two_tower_manifest_uri)
-            post_tower_uri = manifest["post_tower_uri"]
-            post_tower_uuid = manifest["post_tower_clearml_model_id"]
-            user_tower_uri = manifest["user_tower_uri"]
-            user_tower_uuid = manifest["user_tower_clearml_model_id"]
+            two_tower_manifest = _load_manifest(two_tower_manifest_uri)
+            post_tower_uri = two_tower_manifest["post_tower_uri"]
+            post_tower_uuid = two_tower_manifest["post_tower_clearml_model_id"]
+            user_tower_uri = two_tower_manifest["user_tower_uri"]
+            user_tower_uuid = two_tower_manifest["user_tower_clearml_model_id"]
 
-            models_env = os.getenv("GE_INFERENCE_MODELS", "").strip()
-            if not models_env:
-                raise RuntimeError(
-                    "No models configured. Set GE_INFERENCE_MODELS (e.g. 'user-tower,post-tower')."
-                )
+            model_metadata = {"post-tower": (post_tower_uri, post_tower_uuid), "user-tower": (user_tower_uri, user_tower_uuid)}
 
-            env_model_types: list[str] = models_env.split(",")
-            if len(env_model_types) > 2:
-                raise RuntimeError(f"Too many models configured ({len(env_model_types)}). Max is 2.")
+            if "ranker" in configured_model_types:
+                ranker_manifest_uri = os.getenv("GE_INFERENCE_RANKER_MANIFEST_URI", "").strip()
+                if not ranker_manifest_uri:
+                    raise RuntimeError(
+                        "GE_INFERENCE_RANKER_MANIFEST_URI is required — set it to the GCS URI or local path of "
+                        "the ranker_serving_manifest.json produced by training."
+                    )
 
-            tower_uris = {"post-tower": (post_tower_uri, post_tower_uuid), "user-tower": (user_tower_uri, user_tower_uuid)}
+                ranker_manifest = _load_manifest(ranker_manifest_uri)
+                ranker_uri = ranker_manifest["ranker_uri"]
+                ranker_uuid = ranker_manifest["ranker_clearml_model_id"]
 
-            seen: set[str] = set()
-            for env_model_type in env_model_types:
-                if env_model_type in seen:
+                model_metadata["ranker"] = (ranker_uri, ranker_uuid)
+
+            seen: set[ModelType] = set()
+            for model_type in configured_model_types:
+                if model_type in seen:
                     continue
-                seen.add(env_model_type)
+                seen.add(model_type)
 
-                model_type: ModelType = _validate_model_type(env_model_type)
-                uri, model_uuid = tower_uris[model_type]
+                if model_type not in model_metadata:
+                    raise RuntimeError(f"Model type '{model_type}' is not supported by manifest loading yet.")
+                uri, model_uuid = model_metadata[model_type]
 
                 models[model_type] = LoadedModel(
                     model_type=model_type,
@@ -540,10 +745,13 @@ def _resolve_model_file(entry: LoadedModel) -> tuple[str, str | None]:
 
 def _load_entry(entry: LoadedModel) -> None:
     device = _choose_device()
+    entry.max_history_len = _get_max_history_len(entry.model_type)
     model_file, model_id = _resolve_model_file(entry)
 
     m = torch.jit.load(model_file, map_location=device)
     m.eval()
+    if entry.model_type == "ranker" and not callable(getattr(m, "score_candidate_matrix", None)):
+        raise RuntimeError("Ranker model artifact must expose score_candidate_matrix")
 
     entry.module = m
     entry.device = device
@@ -564,7 +772,7 @@ def _load_entry(entry: LoadedModel) -> None:
 def ensure_models_loaded() -> None:
     """Concurrency-safe, idempotent load of all configured models."""
     _init_registry()
-    _ensure_two_tower_author_idx_map_loaded()
+    _ensure_author_idx_maps_loaded()
     if _models_init_error is not None:
         logger.error("Model registry init failed: %s", _models_init_error)
         return
@@ -617,19 +825,24 @@ def _get_single_author_idx_from_did(author_did: str, author_idx_by_did: dict[str
 
 def _get_author_indices_from_dids(
     author_dids: str | list[str] | list[list[str]],
+    author_idx_map_name: str,
 ) -> list[int] | list[list[int]]:
+    # Empty histories have no authors to map, so they should not require the map to be loaded.
+    if isinstance(author_dids, list) and len(author_dids) == 0:
+        return []
+    if author_idx_map_name not in _author_idx_maps or _author_idx_maps[author_idx_map_name] is None:
+        raise HTTPException(status_code=503, detail="Author idx map not loaded")
+    else:
+        author_idx_map = _author_idx_maps[author_idx_map_name].idx_by_did
+        if author_idx_map is None:
+            raise HTTPException(status_code=503, detail="Author idx map not loaded")
+        
     if isinstance(author_dids, str):
-        if _two_tower_author_idx_by_did is None:
-            raise HTTPException(status_code=503, detail="Author idx map not loaded")
-        return [_get_single_author_idx_from_did(author_dids, _two_tower_author_idx_by_did)]
+        return [_get_single_author_idx_from_did(author_dids, author_idx_map)]
     elif isinstance(author_dids, list):
-        if len(author_dids) == 0:
-            return []
-        if _two_tower_author_idx_by_did is None:
-            raise HTTPException(status_code=503, detail="Author idx map not loaded")
-        elif isinstance(author_dids[0], str):
+        if isinstance(author_dids[0], str):
             return [
-                _get_single_author_idx_from_did(did, _two_tower_author_idx_by_did) # type: ignore
+                _get_single_author_idx_from_did(did, author_idx_map) # type: ignore
                 for did in author_dids
             ]
         else: 
@@ -637,21 +850,66 @@ def _get_author_indices_from_dids(
                 raise HTTPException(status_code=422, detail="author dids must either be a string, a list of strings, or a list of list of strings")
             return [
                 [
-                    _get_single_author_idx_from_did(did, _two_tower_author_idx_by_did)
+                    _get_single_author_idx_from_did(did, author_idx_map)
                     for did in author_did_list
                 ] 
                 for author_did_list in author_dids
             ]
 
 
-def _get_target_author_indices_for_request(
+def _get_target_author_indices_for_post_tower_request(
     req: PostTowerPredictRequest,
 ) -> list[int] | list[list[int]]:
     if req.target_author_dids is not None:
-        return _get_author_indices_from_dids(req.target_author_dids)
+        return _get_author_indices_from_dids(req.target_author_dids, "two-tower")
     if isinstance(req.post_embeddings[0], list):
         return [AUTHOR_UNK_IDX] * len(req.post_embeddings)
     return [AUTHOR_UNK_IDX]
+
+
+def _get_target_author_indices_for_ranker_request(
+    req: RankerPredictRequest,
+) -> list[int] | list[list[int]]:
+    if req.candidate_author_dids is not None:
+        return _get_author_indices_from_dids(req.candidate_author_dids, "ranker")
+    if isinstance(req.candidate_post_embeddings[0], list):
+        return [AUTHOR_UNK_IDX] * len(req.candidate_post_embeddings)
+    return [AUTHOR_UNK_IDX]
+
+
+def _get_time_deltas_hours(
+    liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]],
+) -> list[float] | list[list[float]]:
+    """Convert liked-at datetimes into the ranker's elapsed-hours feature."""
+    now = datetime.now(timezone.utc)
+
+    if not isinstance(liked_at_times, list):
+        raise HTTPException(status_code=422, detail="liked_at_times must be a list")
+
+    if len(liked_at_times) == 0:
+        return []
+    elif isinstance(liked_at_times[0], list):
+        return [
+            [
+                (now - dt).total_seconds() / 3600
+                for dt in dt_list  # type: ignore
+            ]
+            for dt_list in liked_at_times
+        ]
+    else:
+        return [
+            (now - dt).total_seconds() / 3600  # type: ignore
+            for dt in liked_at_times
+        ]
+
+
+def _damped_min_max_scaling(logits: torch.Tensor) -> torch.Tensor:
+    lo = logits.min()
+    hi = logits.max()
+    span = hi - lo
+    if span.abs().item() < 1e-6:
+        return torch.zeros_like(logits)
+    return (2.0 * (logits - lo) / span - 1.0).clamp(-1.0, 1.0)
 
 
 def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
@@ -669,14 +927,16 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     )
 
                 author_indices_list = (
-                    _get_author_indices_from_dids(req.history_author_dids)
+                    _get_author_indices_from_dids(req.history_author_dids, "two-tower")
                     if req.history_author_dids is not None
                     else None
                 )
-                # take raw list inputs and pad/truncate:
-                history_embeddings_padded, history_mask_padded, author_indices_padded = get_padded_embedding_history_and_mask_batched(
+                # Pad/truncate the raw history inputs into the fixed sequence tensors expected by TorchScript.
+                if entry.max_history_len is None:
+                    raise ValueError(f"No history length env variable set for model {entry.model_type}!")
+                history_embeddings_padded, history_mask_padded, author_indices_padded, _ = get_padded_embedding_history_and_mask_batched(
                     history_embeddings=req.history_embeddings,
-                    max_history_len=GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
+                    max_history_len=entry.max_history_len,
                     embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
                     author_indices=author_indices_list,
                 )
@@ -686,6 +946,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
 
                 y = entry.module(history_embeddings, history_mask, author_indices)
                 return y
+
             case "post-tower":
                 # Enforce schema against registered model type.
                 if not isinstance(req, PostTowerPredictRequest):
@@ -697,15 +958,99 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 if post_embeddings.dim() == 1:
                     post_embeddings = post_embeddings.unsqueeze(0) # add a batch dimension of size 1 at the beginning
 
-                author_indices_list = _get_target_author_indices_for_request(req)
+                author_indices_list = _get_target_author_indices_for_post_tower_request(req)
                 author_indices = _tensor_from_nested_list("target_author_dids", author_indices_list, torch.int64, entry.device)
                 y = entry.module(post_embeddings, author_indices)
                 return y
+
+            case "ranker":
+                # Enforce schema against registered model type.
+                if not isinstance(req, RankerPredictRequest):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Model type '{entry.model_type}' expects a ranker request body with history and candidate inputs",
+                    )
+                if entry.max_history_len is None:
+                    raise ValueError(f"No history length env variable set for model {entry.model_type}!")
+
+                # Build history-side ranker features together so embeddings, masks, authors, and time deltas stay aligned.
+                history_author_indices_list = (
+                    _get_author_indices_from_dids(req.history_author_dids, "ranker")
+                    if req.history_author_dids is not None
+                    else None
+                )
+                time_deltas_hours_list = _get_time_deltas_hours(req.history_liked_at_times)
+
+                (
+                    history_embeddings_padded,
+                    history_mask_padded,
+                    history_author_indices_padded,
+                    history_time_deltas_hours_padded
+                ) = get_padded_embedding_history_and_mask_batched(
+                    history_embeddings=req.history_embeddings,
+                    max_history_len=entry.max_history_len,
+                    embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
+                    author_indices=history_author_indices_list,
+                    time_deltas_hours=time_deltas_hours_list,
+                )
+                history_embeddings = _tensor_from_nested_list("history_embeddings", history_embeddings_padded, DTYPE_FLOAT, entry.device)
+                history_mask = _tensor_from_nested_list("history_mask", history_mask_padded, torch.bool, entry.device)
+                history_author_indices = _tensor_from_nested_list("author_indices", history_author_indices_padded, torch.int64, entry.device)
+                history_time_deltas_hours = _tensor_from_nested_list("time_deltas_hours", history_time_deltas_hours_padded, DTYPE_FLOAT, entry.device)
+
+                # Candidate-side ranker features are single post vectors, with an optional batch dimension.
+                candidate_post_embeddings = _tensor_from_nested_list(
+                    "candidate_post_embeddings", req.candidate_post_embeddings, DTYPE_FLOAT, entry.device
+                )
+                if candidate_post_embeddings.dim() == 1:
+                    candidate_post_embeddings = candidate_post_embeddings.unsqueeze(0) # add a batch dimension of size 1 at the beginning
+
+                candidate_author_indices_list = _get_target_author_indices_for_ranker_request(req)
+                candidate_author_indices = _tensor_from_nested_list("candidate_author_dids", candidate_author_indices_list, torch.int64, entry.device)
+
+                y = entry.module.score_candidate_matrix(
+                    history_embeddings, history_mask, history_time_deltas_hours,
+                    candidate_post_embeddings, history_author_indices, candidate_author_indices,
+                )
+                scaled_result = _damped_min_max_scaling(y[0])
+                return scaled_result
             case _:
                 assert_never(entry.model_type)
 
     raise HTTPException(status_code=500, detail=f"Unsupported model type: {entry.model_type}")
 
+
+def _current_required_author_idx_map_names() -> list[AuthorIdxType]:
+    if _models:
+        return _required_author_idx_map_names([entry.model_type for entry in _models.values()])
+    try:
+        return _required_author_idx_map_names(_configured_model_types())
+    except Exception:
+        return [name for name in get_args(AuthorIdxType) if name in _author_idx_maps] # type: ignore[misc]
+
+
+def _get_author_idx_map_summary(author_idx_map_name: AuthorIdxType) -> dict[str, Any]:
+    author_idx_map = _author_idx_maps.get(author_idx_map_name)
+    is_ready = _author_idx_map_ready(author_idx_map_name)
+    num_entries = None
+    if author_idx_map is not None and author_idx_map.idx_by_did is not None:
+        num_entries = len(author_idx_map.idx_by_did)
+    return {
+        "ready": is_ready,
+        "uri": author_idx_map.uri if author_idx_map is not None else os.getenv(_author_idx_map_env_var(author_idx_map_name), "").strip() or None,
+        "resolved_path": author_idx_map.resolved_path if author_idx_map is not None else None,
+        "num_entries": num_entries,
+        "load_error": author_idx_map.load_error if author_idx_map is not None else _author_idx_maps_init_error,
+        "load_started_at": _format_timestamp(author_idx_map.load_started_at if author_idx_map is not None else None),
+        "load_finished_at": _format_timestamp(author_idx_map.load_finished_at if author_idx_map is not None else None),
+    }
+
+
+def _get_author_idx_maps_summary() -> dict[str, dict[str, Any]]:
+    return {
+        author_idx_map_name: _get_author_idx_map_summary(author_idx_map_name)
+        for author_idx_map_name in _current_required_author_idx_map_names()
+    }
 
 # -------------------------
 # Endpoints
@@ -723,8 +1068,12 @@ def ready():
 
     models_payload: list[dict[str, Any]] = []
     all_ready = _models_init_error is None and len(_models) > 0
-    two_tower_author_idx_map_ready = _two_tower_author_idx_by_did is not None and _two_tower_author_idx_map_load_error is None
-    all_ready = all_ready and two_tower_author_idx_map_ready
+    author_idx_maps_payload = _get_author_idx_maps_summary()
+    author_idx_maps_ready = (
+        _author_idx_maps_init_error is None and
+        all(author_idx_map["ready"] for author_idx_map in author_idx_maps_payload.values())
+    )
+    all_ready = all_ready and author_idx_maps_ready
     for entry in _models.values():
         model_ready = entry.module is not None and entry.device is not None and entry.load_error is None
         all_ready = all_ready and model_ready
@@ -736,6 +1085,7 @@ def ready():
                 "device": str(entry.device) if entry.device else None,
                 "model_path": entry.resolved_model_path,
                 "model_id": entry.resolved_model_id,
+                "max_history_len": entry.max_history_len,
                 "load_error": entry.load_error,
                 "load_started_at": _format_timestamp(entry.load_started_at),
                 "load_finished_at": _format_timestamp(entry.load_finished_at),
@@ -746,16 +1096,8 @@ def ready():
         "ready": all_ready,
         "registry_error": _models_init_error,
         "embed_dim": GE_INFERENCE_CONTENT_EMBED_DIM if GE_INFERENCE_CONTENT_EMBED_DIM > 0 else None,
-        "two_tower_max_seq_len": GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN,
-        "two_tower_author_idx_map": {
-            "ready": two_tower_author_idx_map_ready,
-            "uri": GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
-            "resolved_path": _two_tower_author_idx_map_resolved_path,
-            "num_entries": len(_two_tower_author_idx_by_did) if _two_tower_author_idx_by_did is not None else None,
-            "load_error": _two_tower_author_idx_map_load_error,
-            "load_started_at": _format_timestamp(_two_tower_author_idx_map_load_started_at),
-            "load_finished_at": _format_timestamp(_two_tower_author_idx_map_load_finished_at),
-        },
+        "author_idx_maps_error": _author_idx_maps_init_error,
+        "author_idx_maps": author_idx_maps_payload,
         "models": models_payload,
     }
 
@@ -767,6 +1109,7 @@ def list_models() -> dict:
     _init_registry()
     ensure_models_loaded()
     models_payload: list[dict[str, Any]] = []
+    author_idx_maps_payload = _get_author_idx_maps_summary()
     for entry in _models.values():
         models_payload.append(
             {
@@ -775,6 +1118,7 @@ def list_models() -> dict:
                 "device": str(entry.device) if entry.device else None,
                 "model_path": entry.resolved_model_path,
                 "model_id": entry.resolved_model_id,
+                "max_history_len": entry.max_history_len,
                 "load_error": entry.load_error,
                 "load_started_at": _format_timestamp(entry.load_started_at),
                 "load_finished_at": _format_timestamp(entry.load_finished_at),
@@ -783,15 +1127,8 @@ def list_models() -> dict:
     return {
         "models": models_payload,
         "registry_error": _models_init_error,
-        "two_tower_author_idx_map": {
-            "ready": _two_tower_author_idx_by_did is not None and _two_tower_author_idx_map_load_error is None,
-            "uri": GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI,
-            "resolved_path": _two_tower_author_idx_map_resolved_path,
-            "num_entries": len(_two_tower_author_idx_by_did) if _two_tower_author_idx_by_did is not None else None,
-            "load_error": _two_tower_author_idx_map_load_error,
-            "load_started_at": _format_timestamp(_two_tower_author_idx_map_load_started_at),
-            "load_finished_at": _format_timestamp(_two_tower_author_idx_map_load_finished_at),
-        },
+        "author_idx_maps_error": _author_idx_maps_init_error,
+        "author_idx_maps": author_idx_maps_payload,
     }
 
 

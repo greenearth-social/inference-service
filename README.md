@@ -2,16 +2,17 @@
 
 FastAPI service for serving Green Earth model inference endpoints on Google Cloud Run.
 
-Today this repo is focused on the engagement-prediction models, especially the
-two-tower retrieval models:
+Today this repo is focused on the engagement-prediction models:
 
 - `user-tower`: scores a user's embedding-history sequence
 - `post-tower`: scores one or more post embedding vectors
+- `ranker`: scores candidate posts against a user's embedding-history sequence
 
-The service loads models based on a `two_tower_serving_manifest.json` file that
-is produced by the engagement-prediction training pipeline and uploaded to GCS.
-The manifest contains the GCS URI and ClearML model ID for each tower, as well
-as the output embedding dimension.
+The service loads the two tower models from a `two_tower_serving_manifest.json`
+file produced by the engagement-prediction training pipeline and uploaded to GCS.
+When `ranker` is configured, it also loads a `ranker_serving_manifest.json`.
+Each manifest contains model artifact URIs and ClearML model IDs for the models
+it describes.
 
 ## Contributing
 
@@ -97,8 +98,13 @@ source .env.example
 At minimum you should set:
 
 - `GE_INFERENCE_MODELS`
+- `GE_INFERENCE_CONTENT_EMBED_DIM`
 - `GE_INFERENCE_TWO_TOWER_MANIFEST_URI` — GCS URI or local path to `two_tower_serving_manifest.json`
-- `GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN`
+- `GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI` — required when loading `user-tower` or `post-tower`
+- `GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN` — required when loading `user-tower`
+- `GE_INFERENCE_RANKER_MANIFEST_URI` — required when loading `ranker`
+- `GE_INFERENCE_RANKER_AUTHOR_MAP_URI` — required when loading `ranker`
+- `GE_INFERENCE_RANKER_MAX_HISTORY_LEN` — required when loading `ranker`
 - `GE_INFERENCE_API_KEY` if you want to call protected endpoints locally
 
 Then start the server:
@@ -189,6 +195,47 @@ Or:
 }
 ```
 
+`ranker` expects one user's history plus one or more candidate post inputs.
+Datetimes should be sent as timezone-aware ISO 8601 strings; the service
+converts them to elapsed hours before calling the model. Ranker model artifacts
+must expose the TorchScript `score_candidate_matrix` method; the current matrix
+serving path is intended for one-layer BST ranker artifacts.
+
+```json
+{
+  "history_embeddings": [
+    [0.1, 0.2, 0.3],
+    [0.4, 0.5, 0.6]
+  ],
+  "history_author_dids": ["did:plc:history-author-1", "did:plc:history-author-2"],
+  "history_liked_at_times": ["2026-06-23T10:00:00Z", "2026-06-23T09:00:00Z"],
+  "candidate_post_embeddings": [0.7, 0.8, 0.9],
+  "candidate_author_dids": "did:plc:candidate-author"
+}
+```
+
+Or with multiple candidates:
+
+```json
+{
+  "history_embeddings": [
+    [0.1, 0.2, 0.3],
+    [0.4, 0.5, 0.6]
+  ],
+  "history_author_dids": ["did:plc:history-author-1", "did:plc:history-author-2"],
+  "history_liked_at_times": ["2026-06-23T10:00:00Z", "2026-06-23T09:00:00Z"],
+  "candidate_post_embeddings": [
+    [0.7, 0.8, 0.9],
+    [1.0, 1.1, 1.2]
+  ],
+  "candidate_author_dids": ["did:plc:candidate-author-1", "did:plc:candidate-author-2"]
+}
+```
+
+Ranker requests may use `history_embeddings: []` or `history_embeddings: [[]]`
+for an empty single-user history. They do not accept batched user histories.
+Ranker responses are flat lists of candidate scores, one score per candidate.
+
 ## Running Tests
 
 Run all tests:
@@ -261,6 +308,20 @@ Deploy to Cloud Run:
   --two-tower-max-history-len 128
 ```
 
+To deploy the ranker too, include the ranker manifest, author map, and max
+history length:
+
+```bash
+./scripts/deploy.sh \
+  --models user-tower,post-tower,ranker \
+  --two-tower-manifest-uri gs://greenearth-471522-engagement-prediction-model-stage/.../two_tower_serving_manifest.json \
+  --two-tower-author-map-uri gs://my-bucket/two_tower_author_idx.parquet \
+  --two-tower-max-history-len 128 \
+  --ranker-manifest-uri gs://greenearth-471522-engagement-prediction-model-stage/.../ranker_serving_manifest.json \
+  --ranker-author-map-uri gs://my-bucket/ranker_author_idx.parquet \
+  --ranker-max-history-len 128
+```
+
 Or with environment variables:
 
 ```bash
@@ -269,13 +330,16 @@ GE_INFERENCE_MODELS=user-tower,post-tower \
 GE_INFERENCE_TWO_TOWER_MANIFEST_URI=gs://greenearth-471522-engagement-prediction-model-prod/.../two_tower_serving_manifest.json \
 GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet \
 GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN=128 \
+GE_INFERENCE_RANKER_MANIFEST_URI=gs://greenearth-471522-engagement-prediction-model-prod/.../ranker_serving_manifest.json \
+GE_INFERENCE_RANKER_AUTHOR_MAP_URI=gs://my-bucket/ranker_author_idx.parquet \
+GE_INFERENCE_RANKER_MAX_HISTORY_LEN=128 \
 ./scripts/deploy.sh
 ```
 
-The manifest (`two_tower_serving_manifest.json`) is produced by the
+The two tower manifest (`two_tower_serving_manifest.json`) is produced by the
 engagement-prediction training pipeline and uploaded to the model bucket. It
 contains the GCS URIs and ClearML model IDs for both towers. `GE_INFERENCE_MODELS`
-still controls which towers are actually loaded.
+still controls which models are actually loaded.
 
 During deploy, the script will:
 
@@ -304,10 +368,13 @@ Common deployment configuration:
 
 Inference configuration:
 
-- `GE_INFERENCE_MODELS`: comma-separated model list, currently `user-tower` and/or `post-tower`
-- `GE_INFERENCE_TWO_TOWER_MANIFEST_URI`: GCS URI or local path to `two_tower_serving_manifest.json` (required); contains model artifact URIs, ClearML model IDs, and output embedding dimension for both towers
-- `GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN`: required max history length for user-tower inputs
-- `GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI`: GCS URI or local path for the author idx parquet map
+- `GE_INFERENCE_MODELS`: comma-separated model list; supported values are `user-tower`, `post-tower`, and `ranker`
+- `GE_INFERENCE_TWO_TOWER_MANIFEST_URI`: GCS URI or local path to `two_tower_serving_manifest.json`; contains model artifact URIs and ClearML model IDs for both towers
+- `GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI`: GCS URI or local path for the two tower author idx parquet map; required when loading `user-tower` or `post-tower`
+- `GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN`: max history length for user-tower inputs; required when loading `user-tower`
+- `GE_INFERENCE_RANKER_MANIFEST_URI`: GCS URI or local path to `ranker_serving_manifest.json`; required when loading `ranker`
+- `GE_INFERENCE_RANKER_AUTHOR_MAP_URI`: GCS URI or local path for the ranker author idx parquet map; required when loading `ranker`
+- `GE_INFERENCE_RANKER_MAX_HISTORY_LEN`: max history length for ranker history inputs; required when loading `ranker`
 
 Runtime configuration used by the app:
 
@@ -315,5 +382,5 @@ Runtime configuration used by the app:
 - `GE_INFERENCE_MAX_BATCH`: maximum allowed batch size
 - `GE_INFERENCE_PREFER_CUDA`: choose CUDA when available
 - `GE_INFERENCE_WARMUP`: whether to run warmup on startup
-- `GE_INFERENCE_CONTENT_EMBED_DIM`: input content embedding dimension
+- `GE_INFERENCE_CONTENT_EMBED_DIM`: required input content embedding dimension
 - `GE_INFERENCE_MODEL_CACHE_DIR`: local cache dir for downloaded `gs://` models

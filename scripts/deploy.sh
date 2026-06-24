@@ -23,8 +23,12 @@ GE_INFERENCE_MODELS="${GE_INFERENCE_MODELS:-}"
 GE_INFERENCE_TWO_TOWER_MANIFEST_URI="${GE_INFERENCE_TWO_TOWER_MANIFEST_URI:-}"
 GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI="${GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI:-}"
 GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN="${GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN:-128}"
+GE_INFERENCE_RANKER_MANIFEST_URI="${GE_INFERENCE_RANKER_MANIFEST_URI:-}"
+GE_INFERENCE_RANKER_AUTHOR_MAP_URI="${GE_INFERENCE_RANKER_AUTHOR_MAP_URI:-}"
+GE_INFERENCE_RANKER_MAX_HISTORY_LEN="${GE_INFERENCE_RANKER_MAX_HISTORY_LEN:-}"
 GE_INFERENCE_CONTENT_EMBED_DIM="${GE_INFERENCE_CONTENT_EMBED_DIM:-384}"
 GE_INFERENCE_MAX_BATCH="${GE_INFERENCE_MAX_BATCH:-0}"
+GE_INFERENCE_MODEL_CACHE_DIR="${GE_INFERENCE_MODEL_CACHE_DIR:-/tmp/model_cache}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -47,6 +51,15 @@ log_error() {
 
 log_build() {
     echo -e "${BLUE}[BUILD]${NC} $1"
+}
+
+models_include() {
+    local model_type="$1"
+    local models="${GE_INFERENCE_MODELS// /}"
+    case ",$models," in
+        *",$model_type,"*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 get_domain_mapping_condition_status() {
@@ -142,6 +155,26 @@ validate_config() {
         log_error "GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI is required."
         log_error "Example: GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI=gs://my-bucket/author_idx.parquet ./deploy.sh"
         exit 1
+    fi
+
+    if models_include "ranker"; then
+        if [ -z "$GE_INFERENCE_RANKER_MANIFEST_URI" ]; then
+            log_error "GE_INFERENCE_RANKER_MANIFEST_URI is required when GE_INFERENCE_MODELS includes ranker."
+            log_error "Example: GE_INFERENCE_RANKER_MANIFEST_URI=gs://my-bucket/.../ranker_serving_manifest.json ./deploy.sh"
+            exit 1
+        fi
+
+        if [ -z "$GE_INFERENCE_RANKER_AUTHOR_MAP_URI" ]; then
+            log_error "GE_INFERENCE_RANKER_AUTHOR_MAP_URI is required when GE_INFERENCE_MODELS includes ranker."
+            log_error "Example: GE_INFERENCE_RANKER_AUTHOR_MAP_URI=gs://my-bucket/ranker_author_idx.parquet ./deploy.sh"
+            exit 1
+        fi
+
+        if [ -z "$GE_INFERENCE_RANKER_MAX_HISTORY_LEN" ] || ! [[ "$GE_INFERENCE_RANKER_MAX_HISTORY_LEN" =~ ^[1-9][0-9]*$ ]]; then
+            log_error "GE_INFERENCE_RANKER_MAX_HISTORY_LEN is required and must be a positive integer when GE_INFERENCE_MODELS includes ranker."
+            log_error "Example: GE_INFERENCE_RANKER_MAX_HISTORY_LEN=128 ./deploy.sh"
+            exit 1
+        fi
     fi
 
     if [ -z "$GE_INFERENCE_MAX_BATCH" ] || ! [[ "$GE_INFERENCE_MAX_BATCH" =~ ^[0-9]+$ ]]; then
@@ -257,8 +290,12 @@ deploy_inference_service() {
 GE_INFERENCE_MODELS: "$GE_INFERENCE_MODELS"
 GE_INFERENCE_TWO_TOWER_MANIFEST_URI: "$GE_INFERENCE_TWO_TOWER_MANIFEST_URI"
 GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN: "$GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"
+GE_INFERENCE_RANKER_MANIFEST_URI: "$GE_INFERENCE_RANKER_MANIFEST_URI"
+GE_INFERENCE_RANKER_AUTHOR_MAP_URI: "$GE_INFERENCE_RANKER_AUTHOR_MAP_URI"
+GE_INFERENCE_RANKER_MAX_HISTORY_LEN: "$GE_INFERENCE_RANKER_MAX_HISTORY_LEN"
 GE_INFERENCE_CONTENT_EMBED_DIM: "$GE_INFERENCE_CONTENT_EMBED_DIM"
 GE_INFERENCE_MAX_BATCH: "$GE_INFERENCE_MAX_BATCH"
+GE_INFERENCE_MODEL_CACHE_DIR: "$GE_INFERENCE_MODEL_CACHE_DIR"
 GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI: "$GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"
 GE_INFERENCE_PREFER_CUDA: "0"
 GE_INFERENCE_WARMUP: "0"
@@ -303,8 +340,13 @@ main() {
     log_info "Models:          $GE_INFERENCE_MODELS"
     log_info "Manifest URI:    $GE_INFERENCE_TWO_TOWER_MANIFEST_URI"
     log_info "Max history len: $GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN"
+    if models_include "ranker"; then
+        log_info "Ranker manifest: $GE_INFERENCE_RANKER_MANIFEST_URI"
+        log_info "Ranker max hist: $GE_INFERENCE_RANKER_MAX_HISTORY_LEN"
+    fi
     log_info "Embed dimension: $GE_INFERENCE_CONTENT_EMBED_DIM"
     log_info "Max batch:       $GE_INFERENCE_MAX_BATCH"
+    log_info "Model cache dir: $GE_INFERENCE_MODEL_CACHE_DIR"
 
     validate_config
     generate_requirements
@@ -346,12 +388,28 @@ while [[ $# -gt 0 ]]; do
             GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN="$2"
             shift 2
             ;;
+        --ranker-manifest-uri)
+            GE_INFERENCE_RANKER_MANIFEST_URI="$2"
+            shift 2
+            ;;
+        --ranker-author-map-uri)
+            GE_INFERENCE_RANKER_AUTHOR_MAP_URI="$2"
+            shift 2
+            ;;
+        --ranker-max-history-len)
+            GE_INFERENCE_RANKER_MAX_HISTORY_LEN="$2"
+            shift 2
+            ;;
         --content-embed-dim)
             GE_INFERENCE_CONTENT_EMBED_DIM="$2"
             shift 2
             ;;
         --max-batch)
             GE_INFERENCE_MAX_BATCH="$2"
+            shift 2
+            ;;
+        --model-cache-dir)
+            GE_INFERENCE_MODEL_CACHE_DIR="$2"
             shift 2
             ;;
         --inference-domain)
@@ -378,12 +436,16 @@ while [[ $# -gt 0 ]]; do
             echo "  --region REGION                 GCP region (default: us-east1)"
             echo "  --environment ENV               Environment name (default: stage)"
             echo "  --models TYPES                  Comma-separated model types to load (required)"
-            echo "                                  Supported: user-tower, post-tower"
+            echo "                                  Supported: user-tower, post-tower, ranker"
             echo "  --two-tower-manifest-uri URI    GCS URI or local path to two_tower_serving_manifest.json (required)"
             echo "  --content-embed-dim N           Dimension of the input content embeddings (required)"
             echo "  --two-tower-author-map-uri URI  GCS URI or local path for the author idx parquet map (required)"
             echo "  --two-tower-max-history-len N   Maximum user history sequence length (required)"
+            echo "  --ranker-manifest-uri URI       GCS URI or local path to ranker_serving_manifest.json (required with ranker)"
+            echo "  --ranker-author-map-uri URI     GCS URI or local path for the ranker author idx parquet map (required with ranker)"
+            echo "  --ranker-max-history-len N      Maximum ranker history sequence length (required with ranker)"
             echo "  --max-batch N                   Max batch size allowed for inference"
+            echo "  --model-cache-dir PATH          Local cache dir for downloaded gs:// artifacts"
             echo "  --inference-domain DOMAIN       Custom mapped domain for inference service"
             echo "  --disable-domain-mapping        Skip domain mapping reconciliation"
             echo "  --min-instances N               Minimum Cloud Run instances (default: 1)"
@@ -397,8 +459,12 @@ while [[ $# -gt 0 ]]; do
             echo "  GE_INFERENCE_MODELS                      Same as --models (required)"
             echo "  GE_INFERENCE_TWO_TOWER_MANIFEST_URI      Same as --two-tower-manifest-uri (required)"
             echo "  GE_INFERENCE_TWO_TOWER_MAX_HISTORY_LEN   Same as --two-tower-max-history-len (required)"
+            echo "  GE_INFERENCE_RANKER_MANIFEST_URI         Same as --ranker-manifest-uri (required with ranker)"
+            echo "  GE_INFERENCE_RANKER_AUTHOR_MAP_URI       Same as --ranker-author-map-uri (required with ranker)"
+            echo "  GE_INFERENCE_RANKER_MAX_HISTORY_LEN      Same as --ranker-max-history-len (required with ranker)"
             echo "  GE_INFERENCE_CONTENT_EMBED_DIM           Same as --content-embed-dim (required)"
             echo "  GE_INFERENCE_MAX_BATCH                   Same as --max-batch (optional; 0 = no limit)"
+            echo "  GE_INFERENCE_MODEL_CACHE_DIR             Same as --model-cache-dir"
             echo "  GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI    GCS URI or local path for the two tower author idx parquet map"
             echo "  GE_ENABLE_INFERENCE_DOMAIN_MAPPING       true/false toggle (default: true)"
             echo "  GE_INFERENCE_DOMAIN                      Custom mapped domain"
@@ -411,6 +477,15 @@ while [[ $# -gt 0 ]]; do
             echo "     --two-tower-manifest-uri gs://my-bucket/.../two_tower_serving_manifest.json \\"
             echo "     --two-tower-author-map-uri gs://my-bucket/author_idx.parquet \\"
             echo "     --two-tower-max-history-len 50"
+            echo ""
+            echo "  $0 --environment stage \\"
+            echo "     --models user-tower,post-tower,ranker \\"
+            echo "     --two-tower-manifest-uri gs://my-bucket/.../two_tower_serving_manifest.json \\"
+            echo "     --two-tower-author-map-uri gs://my-bucket/two_tower_author_idx.parquet \\"
+            echo "     --two-tower-max-history-len 128 \\"
+            echo "     --ranker-manifest-uri gs://my-bucket/.../ranker_serving_manifest.json \\"
+            echo "     --ranker-author-map-uri gs://my-bucket/ranker_author_idx.parquet \\"
+            echo "     --ranker-max-history-len 128"
             exit 0
             ;;
         *)
