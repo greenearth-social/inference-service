@@ -455,6 +455,16 @@ def test_ranker_request_accepts_single_empty_history_and_multiple_candidate_post
     )
 
 
+def test_ranker_request_accepts_nested_single_empty_history_and_multiple_candidate_posts(app_request):
+    app_request.RankerPredictRequest(
+        history_embeddings=[[]],
+        history_author_dids=[],
+        history_liked_at_times=[[]],
+        candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+        candidate_author_dids=["candidate-1", "candidate-2"],
+    )
+
+
 def test_ranker_request_rejects_batched_histories(app_request):
     with pytest.raises(ValueError, match="single user history"):
         app_request.RankerPredictRequest(
@@ -915,6 +925,51 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
     assert out.tolist() == [0.25]
 
 
+def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candidates(app_request, monkeypatch):
+    captured = {}
+    _freeze_app_now(app_request, monkeypatch)
+    monkeypatch.setattr(app_request, "_author_idx_maps", {})
+
+    class RankerModel:
+        def score_candidate_matrix(
+            self,
+            history_embeddings,
+            history_mask,
+            history_time_deltas_hours,
+            candidate_post_embeddings,
+            history_author_indices,
+            candidate_author_indices,
+        ):
+            captured["history_embeddings"] = history_embeddings.value
+            captured["history_mask"] = history_mask.value
+            captured["history_time_deltas_hours"] = history_time_deltas_hours.value
+            captured["candidate_post_embeddings"] = candidate_post_embeddings.value
+            captured["history_author_indices"] = history_author_indices.value
+            captured["candidate_author_indices"] = candidate_author_indices.value
+            return app_request.torch.Tensor([[0.25, 0.75]])
+
+    entry = app_request.LoadedModel(model_type="ranker")
+    entry.module = RankerModel()
+    entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 3
+
+    req = app_request.RankerPredictRequest(
+        history_embeddings=[[]],
+        history_author_dids=[],
+        history_liked_at_times=[[]],
+        candidate_post_embeddings=[[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]],
+    )
+    out = app_request._predict_with_entry(entry, req)
+
+    assert captured["history_embeddings"] == [[[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]]
+    assert captured["history_mask"] == [[False, False, False]]
+    assert captured["history_time_deltas_hours"] == [[0.0, 0.0, 0.0]]
+    assert captured["candidate_post_embeddings"] == [[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]]
+    assert captured["history_author_indices"] == [[app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX]]
+    assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX, app_request.AUTHOR_UNK_IDX]
+    assert out.tolist() == [0.25, 0.75]
+
+
 def test_predict_with_entry_ranker_rejects_liked_at_length_mismatch(app_request, monkeypatch):
     _freeze_app_now(app_request, monkeypatch)
 
@@ -1109,6 +1164,35 @@ def test_load_entry_accepts_ranker_with_matrix_scorer(monkeypatch):
     assert entry.max_history_len == app._get_max_history_len("ranker")
 
 
+def test_warmup_entry_ranker_uses_matrix_scorer(monkeypatch):
+    app = _load_app_module("inference_service_ranker_warmup_matrix_tests", model_types="ranker")
+    captured = {}
+
+    class MatrixRanker:
+        def score_candidate_matrix(self, *args):
+            captured["matrix_args"] = [arg.value for arg in args]
+            return app.torch.Tensor([[0.5]])
+
+        def __call__(self, *args):
+            raise AssertionError("ranker warmup should use score_candidate_matrix")
+
+    entry = app.LoadedModel(model_type="ranker")
+    entry.module = MatrixRanker()
+    entry.device = app.torch.device("cuda")
+    entry.max_history_len = 6
+
+    app._warmup_entry(entry)
+
+    assert captured["matrix_args"] == [
+        (1, 6, app.GE_INFERENCE_CONTENT_EMBED_DIM),
+        (1, 6),
+        (1, 6),
+        (1, app.GE_INFERENCE_CONTENT_EMBED_DIM),
+        [[app.AUTHOR_PAD_IDX] * 6],
+        [app.AUTHOR_UNK_IDX],
+    ]
+
+
 def test_load_entry_rejects_ranker_without_matrix_scorer(monkeypatch):
     app = _load_app_module("inference_service_ranker_forward_only_load_tests", model_types="ranker")
 
@@ -1121,6 +1205,23 @@ def test_load_entry_rejects_ranker_without_matrix_scorer(monkeypatch):
 
     monkeypatch.setattr(app, "_resolve_model_file", lambda _entry: ("ranker.pt", "ranker-id"))
     monkeypatch.setattr(app.torch.jit, "load", lambda *args, **kwargs: ForwardOnlyRanker())
+
+    entry = app.LoadedModel(model_type="ranker")
+    with pytest.raises(RuntimeError, match="score_candidate_matrix"):
+        app._load_entry(entry)
+
+
+def test_load_entry_rejects_ranker_with_non_callable_matrix_scorer(monkeypatch):
+    app = _load_app_module("inference_service_ranker_non_callable_matrix_load_tests", model_types="ranker")
+
+    class BrokenMatrixRanker:
+        score_candidate_matrix = None
+
+        def eval(self):
+            return self
+
+    monkeypatch.setattr(app, "_resolve_model_file", lambda _entry: ("ranker.pt", "ranker-id"))
+    monkeypatch.setattr(app.torch.jit, "load", lambda *args, **kwargs: BrokenMatrixRanker())
 
     entry = app.LoadedModel(model_type="ranker")
     with pytest.raises(RuntimeError, match="score_candidate_matrix"):

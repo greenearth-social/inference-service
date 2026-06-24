@@ -195,9 +195,11 @@ Or:
 }
 ```
 
-`ranker` expects user history inputs plus candidate post inputs. Datetimes should
-be sent as timezone-aware ISO 8601 strings; the service converts them to elapsed
-hours before calling the model.
+`ranker` expects one user's history plus one or more candidate post inputs.
+Datetimes should be sent as timezone-aware ISO 8601 strings; the service
+converts them to elapsed hours before calling the model. Ranker model artifacts
+must expose the TorchScript `score_candidate_matrix` method; the current matrix
+serving path is intended for one-layer BST ranker artifacts.
 
 ```json
 {
@@ -212,22 +214,16 @@ hours before calling the model.
 }
 ```
 
-Or batched:
+Or with multiple candidates:
 
 ```json
 {
   "history_embeddings": [
-    [[0.1, 0.2, 0.3]],
-    [[0.4, 0.5, 0.6], [0.7, 0.8, 0.9]]
+    [0.1, 0.2, 0.3],
+    [0.4, 0.5, 0.6]
   ],
-  "history_author_dids": [
-    ["did:plc:history-author-1"],
-    ["did:plc:history-author-2", "did:plc:history-author-3"]
-  ],
-  "history_liked_at_times": [
-    ["2026-06-23T10:00:00Z"],
-    ["2026-06-23T09:00:00Z", "2026-06-23T08:00:00Z"]
-  ],
+  "history_author_dids": ["did:plc:history-author-1", "did:plc:history-author-2"],
+  "history_liked_at_times": ["2026-06-23T10:00:00Z", "2026-06-23T09:00:00Z"],
   "candidate_post_embeddings": [
     [0.7, 0.8, 0.9],
     [1.0, 1.1, 1.2]
@@ -235,6 +231,10 @@ Or batched:
   "candidate_author_dids": ["did:plc:candidate-author-1", "did:plc:candidate-author-2"]
 }
 ```
+
+Ranker requests may use `history_embeddings: []` or `history_embeddings: [[]]`
+for an empty single-user history. They do not accept batched user histories.
+Ranker responses are flat lists of candidate scores, one score per candidate.
 
 ## Running Tests
 
