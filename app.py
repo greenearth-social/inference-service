@@ -903,6 +903,15 @@ def _get_time_deltas_hours(
         ]
 
 
+def _damped_min_max_scaling(logits: torch.Tensor) -> torch.Tensor:
+    lo = logits.min()
+    hi = logits.max()
+    span = hi - lo
+    if span.abs().item() < 1e-6:
+        return torch.zeros_like(logits)
+    return (2.0 * (logits - lo) / span - 1.0).clamp(-1.0, 1.0)
+
+
 def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
     _require_ready(entry)
     assert entry.module is not None and entry.device is not None
@@ -1003,7 +1012,8 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     history_embeddings, history_mask, history_time_deltas_hours,
                     candidate_post_embeddings, history_author_indices, candidate_author_indices,
                 )
-                return y[0]
+                scaled_result = _damped_min_max_scaling(y[0])
+                return scaled_result
             case _:
                 assert_never(entry.model_type)
 

@@ -37,6 +37,26 @@ def _install_stub_modules() -> None:
             def __init__(self, value):
                 self.value = value
 
+            def _map(self, fn):
+                def _apply(value):
+                    if isinstance(value, list):
+                        return [_apply(item) for item in value]
+                    return fn(value)
+
+                return DummyTensor(_apply(self.value))
+
+            def _binary_op(self, other, fn):
+                other_value = other.value if isinstance(other, DummyTensor) else other
+
+                def _apply(left, right):
+                    if isinstance(left, list):
+                        return [_apply(item, right) for item in left]
+                    if isinstance(right, list):
+                        return [_apply(left, item) for item in right]
+                    return fn(left, right)
+
+                return DummyTensor(_apply(self.value, other_value))
+
             def numel(self):
                 return 1
 
@@ -65,6 +85,59 @@ def _install_stub_modules() -> None:
             def __getitem__(self, idx):
                 return DummyTensor(self.value[idx])
 
+            def __add__(self, other):
+                return self._binary_op(other, lambda left, right: left + right)
+
+            def __radd__(self, other):
+                return self.__add__(other)
+
+            def __sub__(self, other):
+                return self._binary_op(other, lambda left, right: left - right)
+
+            def __rsub__(self, other):
+                return self._binary_op(other, lambda left, right: right - left)
+
+            def __mul__(self, other):
+                return self._binary_op(other, lambda left, right: left * right)
+
+            def __rmul__(self, other):
+                return self.__mul__(other)
+
+            def __truediv__(self, other):
+                return self._binary_op(other, lambda left, right: left / right)
+
+            def min(self):
+                def _flatten(value):
+                    if isinstance(value, list):
+                        return [item for nested in value for item in _flatten(nested)]
+                    return [value]
+
+                return DummyTensor(min(_flatten(self.value)))
+
+            def max(self):
+                def _flatten(value):
+                    if isinstance(value, list):
+                        return [item for nested in value for item in _flatten(nested)]
+                    return [value]
+
+                return DummyTensor(max(_flatten(self.value)))
+
+            def abs(self):
+                return self._map(abs)
+
+            def item(self):
+                return self.value
+
+            def clamp(self, min=None, max=None):
+                def _clamp(value):
+                    if min is not None and value < min:
+                        return min
+                    if max is not None and value > max:
+                        return max
+                    return value
+
+                return self._map(_clamp)
+
         class DummyDevice:
             def __init__(self, kind):
                 self.type = kind
@@ -81,6 +154,7 @@ def _install_stub_modules() -> None:
         torch.device = DummyDevice
         torch.tensor = lambda value, dtype=None, device=None: DummyTensor(value)
         torch.zeros = lambda shape, dtype=None, device=None: DummyTensor(shape)
+        torch.zeros_like = lambda tensor: tensor._map(lambda _value: 0.0)
         torch.ones = lambda shape, dtype=None, device=None: DummyTensor(shape)
         torch.inference_mode = inference_mode
         torch.cuda = types.SimpleNamespace(is_available=lambda: False)
@@ -811,6 +885,24 @@ def test_get_time_deltas_hours_handles_single_and_batched_times(app_request, mon
     assert app_request._get_time_deltas_hours([[], [_liked_at(3)]]) == [[], [3.0]]
 
 
+def test_min_max_scaling_maps_ranker_logits_to_unit_interval(app_request):
+    scaled = app_request._damped_min_max_scaling(app_request.torch.Tensor([0.25, 0.75]))
+
+    assert scaled.tolist() == [-1.0, 1.0]
+
+
+def test_min_max_scaling_preserves_candidate_order(app_request):
+    scaled = app_request._damped_min_max_scaling(app_request.torch.Tensor([0.5, 0.25, 0.75]))
+
+    assert scaled.tolist() == [0.0, -1.0, 1.0]
+
+
+def test_min_max_scaling_returns_zero_for_equal_ranker_logits(app_request):
+    scaled = app_request._damped_min_max_scaling(app_request.torch.Tensor([0.5, 0.5]))
+
+    assert scaled.tolist() == [0.0, 0.0]
+
+
 def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_inputs(app_request, monkeypatch):
     captured = {}
     _freeze_app_now(app_request, monkeypatch)
@@ -878,7 +970,7 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
     assert captured["model_inputs"]["candidate_post_embeddings"] == [[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]]
     assert captured["model_inputs"]["history_author_indices"] == [[12, 0]]
     assert captured["model_inputs"]["candidate_author_indices"] == [13, app_request.AUTHOR_UNK_IDX]
-    assert out.tolist() == [0.75, 0.5]
+    assert out.tolist() == [1.0, -1.0]
 
 
 def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
@@ -922,7 +1014,7 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
     assert captured["candidate_post_embeddings"] == [[3.0, 2.0, 1.0]]
     assert captured["history_author_indices"] == [[app_request.AUTHOR_UNK_IDX, 0, 0]]
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX]
-    assert out.tolist() == [0.25]
+    assert out.tolist() == [0.0]
 
 
 def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candidates(app_request, monkeypatch):
@@ -967,7 +1059,7 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
     assert captured["candidate_post_embeddings"] == [[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]]
     assert captured["history_author_indices"] == [[app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX]]
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX, app_request.AUTHOR_UNK_IDX]
-    assert out.tolist() == [0.25, 0.75]
+    assert out.tolist() == [-1.0, 1.0]
 
 
 def test_predict_with_entry_ranker_rejects_liked_at_length_mismatch(app_request, monkeypatch):
