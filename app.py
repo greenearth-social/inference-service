@@ -267,10 +267,7 @@ def _validate_liked_at_times(
     match shape:
         case "single_empty":
             if len(history_liked_at_times) > 0:
-                if len(history_liked_at_times) > 1:
-                    raise ValueError(f"History embeddings is a single empty entry but liked-at times has multiple entries")
-                if not isinstance(history_liked_at_times[0], list) or len(history_liked_at_times[0]) > 0:
-                    raise ValueError(f"History embeddings is a single empty entry but liked-at times is not empty")
+                raise ValueError(f"History embeddings is a single empty entry but liked-at times is not empty")
             return 1
         case "single_history":
             if not isinstance(history_liked_at_times, list):
@@ -279,11 +276,7 @@ def _validate_liked_at_times(
                 raise ValueError("when 'history_embeddings' is a single history, 'history_liked_at_times' must be a list of datetimes, not a list of list of datetimes")
             return 1
         case "batched_history":
-            if not isinstance(history_liked_at_times, list):
-                raise ValueError("when 'history_embeddings' is batched, 'history_liked_at_times' must be a list of list of datetimes")
-            if len(history_liked_at_times) == 0 or not isinstance(history_liked_at_times[0], list):
-                raise ValueError("when 'history_embeddings' is batched, 'history_liked_at_times' must be a list of list of datetimes, not a list of datetimes")
-            return len(history_liked_at_times)
+            raise ValueError("'history_liked_at_times' should never be batched")
         case _:
             assert_never(shape)
 
@@ -350,10 +343,10 @@ class PostTowerPredictRequest(BaseModel):
 
 
 class RankerPredictRequest(BaseModel):
-    # history_embeddings: [T, D] or [B, T, D]
-    history_embeddings: list[list[float]] | list[list[list[float]]]
-    history_author_dids: list[str] | list[list[str]] | None = None
-    history_liked_at_times: list[AwareDatetime] | list[list[AwareDatetime]]
+    # history_embeddings: [T, D] (a single user)
+    history_embeddings: list[list[float]]
+    history_author_dids: list[str] | None = None
+    history_liked_at_times: list[AwareDatetime]
     # candidate_post_embeddings: [D] or [B, D]
     candidate_post_embeddings: list[float] | list[list[float]]
     candidate_author_dids: str | list[str] | None = None
@@ -361,15 +354,16 @@ class RankerPredictRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "RankerPredictRequest":
         shape = classify_history_embeddings_shape(self.history_embeddings)
-        if shape == "batched_history":
-            raise ValueError("ranker requests must include a single user history, not batched histories")
-        history_batch_size = _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
-        history_times_batch_size = _validate_liked_at_times(shape, self.history_liked_at_times)
-        if history_batch_size != history_times_batch_size:
-            raise ValueError(
-                f"History batch size ({history_batch_size}) must match history liked at times batch size ({len(self.history_liked_at_times)})"
-            )
+        _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
+        _validate_liked_at_times(shape, self.history_liked_at_times)
 
+        history_length = len(self.history_embeddings)
+        if shape == "single_empty":
+            history_length = 0
+        if history_length != len(self.history_liked_at_times):
+            raise ValueError(
+                f"History length ({history_length}) must match history liked at times length ({len(self.history_liked_at_times)})"
+            )
         _validate_post_embeddings(self.candidate_post_embeddings, self.candidate_author_dids)
         return self
 
