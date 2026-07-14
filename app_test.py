@@ -533,14 +533,14 @@ def test_ranker_request_accepts_nested_single_empty_history_and_multiple_candida
     app_request.RankerPredictRequest(
         history_embeddings=[[]],
         history_author_dids=[],
-        history_liked_at_times=[[]],
+        history_liked_at_times=[],
         candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
         candidate_author_dids=["candidate-1", "candidate-2"],
     )
 
 
 def test_ranker_request_rejects_batched_histories(app_request):
-    with pytest.raises(ValueError, match="single user history"):
+    with pytest.raises(ValueError, match="Input should be a valid number"):
         app_request.RankerPredictRequest(
             history_embeddings=[[], [[1.0, 2.0, 3.0]], [[]]],
             history_author_dids=[[], ["author-1"], []],
@@ -560,7 +560,7 @@ def test_ranker_request_rejects_naive_liked_at_times(app_request):
 
 
 def test_ranker_request_rejects_single_history_liked_at_times_shape_mismatch(app_request):
-    with pytest.raises(ValueError, match="must be a list of datetimes"):
+    with pytest.raises(ValueError, match="Input should be a valid datetime"):
         app_request.RankerPredictRequest(
             history_embeddings=[[1.0, 2.0, 3.0]],
             history_liked_at_times=[[_liked_at(1)]],
@@ -569,7 +569,7 @@ def test_ranker_request_rejects_single_history_liked_at_times_shape_mismatch(app
 
 
 def test_ranker_request_rejects_batched_history_liked_at_times_shape_mismatch(app_request):
-    with pytest.raises(ValueError, match="single user history"):
+    with pytest.raises(ValueError, match="Input should be a valid number"):
         app_request.RankerPredictRequest(
             history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
             history_liked_at_times=[_liked_at(1), _liked_at(2)],
@@ -578,7 +578,7 @@ def test_ranker_request_rejects_batched_history_liked_at_times_shape_mismatch(ap
 
 
 def test_ranker_request_rejects_history_and_liked_at_batch_mismatch(app_request):
-    with pytest.raises(ValueError, match="single user history"):
+    with pytest.raises(ValueError, match="Input should be a valid number"):
         app_request.RankerPredictRequest(
             history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
             history_liked_at_times=[[_liked_at(1)]],
@@ -587,7 +587,7 @@ def test_ranker_request_rejects_history_and_liked_at_batch_mismatch(app_request)
 
 
 def test_ranker_request_rejects_history_and_candidate_post_batch_mismatch(app_request):
-    with pytest.raises(ValueError, match="single user history"):
+    with pytest.raises(ValueError, match="Input should be a valid number"):
         app_request.RankerPredictRequest(
             history_embeddings=[[[1.0, 2.0, 3.0]], [[4.0, 5.0, 6.0]]],
             history_liked_at_times=[[_liked_at(1)], [_liked_at(2)]],
@@ -1048,7 +1048,7 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
     req = app_request.RankerPredictRequest(
         history_embeddings=[[]],
         history_author_dids=[],
-        history_liked_at_times=[[]],
+        history_liked_at_times=[],
         candidate_post_embeddings=[[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]],
     )
     out = app_request._predict_with_entry(entry, req)
@@ -1062,22 +1062,13 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
     assert out.tolist() == [-1.0, 1.0]
 
 
-def test_predict_with_entry_ranker_rejects_liked_at_length_mismatch(app_request, monkeypatch):
-    _freeze_app_now(app_request, monkeypatch)
-
-    entry = app_request.LoadedModel(model_type="ranker")
-    entry.module = Mock()
-    entry.device = app_request.torch.device("cpu")
-    entry.max_history_len = 3
-
-    req = app_request.RankerPredictRequest(
-        history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
-        history_liked_at_times=[_liked_at(1)],
-        candidate_post_embeddings=[3.0, 2.0, 1.0],
-    )
-
-    with pytest.raises(ValueError, match="Length of time_deltas_hours must match history length"):
-        app_request._predict_with_entry(entry, req)
+def test_ranker_request_rejects_liked_at_length_mismatch(app_request):
+    with pytest.raises(ValueError, match="History length \\(2\\) must match history liked at times length \\(1\\)"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+            history_liked_at_times=[_liked_at(1)],
+            candidate_post_embeddings=[3.0, 2.0, 1.0],
+        )
 
 
 def test_predict_with_entry_rejects_request_type_mismatch(app_request):

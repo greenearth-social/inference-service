@@ -343,7 +343,7 @@ class PostTowerPredictRequest(BaseModel):
 
 
 class RankerPredictRequest(BaseModel):
-    # history_embeddings: [T, D] or [B, T, D]
+    # history_embeddings: [T, D] (a single user)
     history_embeddings: list[list[float]]
     history_author_dids: list[str] | None = None
     history_liked_at_times: list[AwareDatetime]
