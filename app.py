@@ -281,6 +281,28 @@ def _validate_liked_at_times(
             assert_never(shape)
 
 
+def _validate_history_prior_cumulative_likes(
+    shape: HistoryEmbeddingsShape,
+    history_prior_cumulative_likes: list[int] | list[list[int]]
+) -> int:
+    """Validate prior cumulative likes nesting and return the inferred batch size."""
+    match shape:
+        case "single_empty":
+            if len(history_prior_cumulative_likes) > 0:
+                raise ValueError(f"History embeddings is a single empty entry but prior cumulative likes is not empty")
+            return 1
+        case "single_history":
+            if not isinstance(history_prior_cumulative_likes, list):
+                raise ValueError("'history_prior_cumulative_likes' must be a list")
+            if len(history_prior_cumulative_likes) == 0 or isinstance(history_prior_cumulative_likes[0], list):
+                raise ValueError("when 'history_embeddings' is a single history, 'history_prior_cumulative_likes' must be a list of ints, not a list of list of ints")
+            return 1
+        case "batched_history":
+            raise ValueError("'history_prior_cumulative_likes' should never be batched")
+        case _:
+            assert_never(shape)
+
+
 def _validate_post_embeddings(
     pe: list[float] | list[list[float]],
     author_dids: str | list[str] | None,
@@ -347,16 +369,20 @@ class RankerPredictRequest(BaseModel):
     history_embeddings: list[list[float]]
     history_author_dids: list[str] | None = None
     history_liked_at_times: list[AwareDatetime]
+    history_prior_cumulative_likes: list[int] | None = None
     # candidate_post_embeddings: [D] or [B, D]
     candidate_post_embeddings: list[float] | list[list[float]]
     candidate_author_dids: str | list[str] | None = None
+    candidate_prior_cumulative_likes: int | list[int] | None = None
 
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "RankerPredictRequest":
+        # validate user history inputs
         shape = classify_history_embeddings_shape(self.history_embeddings)
         _validate_user_history(shape, self.history_embeddings, self.history_author_dids)
         _validate_liked_at_times(shape, self.history_liked_at_times)
-
+        if self.history_prior_cumulative_likes is not None:
+            _validate_history_prior_cumulative_likes(shape, self.history_prior_cumulative_likes)
         history_length = len(self.history_embeddings)
         if shape == "single_empty":
             history_length = 0
@@ -364,7 +390,18 @@ class RankerPredictRequest(BaseModel):
             raise ValueError(
                 f"History length ({history_length}) must match history liked at times length ({len(self.history_liked_at_times)})"
             )
-        _validate_post_embeddings(self.candidate_post_embeddings, self.candidate_author_dids)
+        if self.history_prior_cumulative_likes is not None and history_length != len(self.history_prior_cumulative_likes):
+            raise ValueError(f"History length ({history_length}) must match history prior cumulative likes length ({len(self.history_prior_cumulative_likes)})")
+
+        # validate candidate inputs
+        num_candidates = _validate_post_embeddings(self.candidate_post_embeddings, self.candidate_author_dids)
+        if self.candidate_prior_cumulative_likes is not None:
+            if isinstance(self.candidate_prior_cumulative_likes, list):
+                if len(self.candidate_prior_cumulative_likes) != num_candidates:
+                    raise ValueError(f"Candidate prior cumulative likes length ({len(self.candidate_prior_cumulative_likes)}) must match number of candidates ({num_candidates})")
+            else:
+                if num_candidates != 1:
+                    raise ValueError(f"Candidate prior cumulative likes is a single int but number of candidates is {num_candidates}")
         return self
 
 
@@ -638,11 +675,14 @@ def _warmup_entry(entry: LoadedModel) -> None:
             history_mask = torch.ones((1, entry.max_history_len), dtype=torch.bool, device=device)
             history_author_indices = torch.tensor([[AUTHOR_PAD_IDX] * entry.max_history_len], dtype=torch.int64, device=device)
             history_liked_at_hour_deltas = torch.zeros((1, entry.max_history_len), dtype=DTYPE_FLOAT, device=device)
+            history_prior_cumulative_likes = torch.zeros((1, entry.max_history_len), dtype=torch.int64, device=device)
             candidate_post_embeddings = torch.zeros((1, GE_INFERENCE_CONTENT_EMBED_DIM), dtype=DTYPE_FLOAT, device=device)
             candidate_author_indices = torch.tensor([AUTHOR_UNK_IDX], dtype=torch.int64, device=device)
+            candidate_prior_cumulative_likes = torch.zeros((1,), dtype=torch.int64, device=device)
             _ = model.score_candidate_matrix(
                 history_embeddings, history_mask, history_liked_at_hour_deltas,
                 candidate_post_embeddings, history_author_indices, candidate_author_indices,
+                history_prior_cumulative_likes, candidate_prior_cumulative_likes,
             )
             return
 
@@ -897,6 +937,18 @@ def _get_time_deltas_hours(
         ]
 
 
+def _get_candidate_prior_cumulative_like_counts(
+    req: RankerPredictRequest,
+) -> list[int]:
+    if req.candidate_prior_cumulative_likes is not None:
+        if isinstance(req.candidate_prior_cumulative_likes, int):
+            return [req.candidate_prior_cumulative_likes]
+        return req.candidate_prior_cumulative_likes
+    if isinstance(req.candidate_post_embeddings[0], list):
+        return [0] * len(req.candidate_post_embeddings)
+    return [0]
+
+
 def _damped_min_max_scaling(logits: torch.Tensor) -> torch.Tensor:
     lo = logits.min()
     hi = logits.max()
@@ -928,7 +980,12 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 # Pad/truncate the raw history inputs into the fixed sequence tensors expected by TorchScript.
                 if entry.max_history_len is None:
                     raise ValueError(f"No history length env variable set for model {entry.model_type}!")
-                history_embeddings_padded, history_mask_padded, author_indices_padded, _ = get_padded_embedding_history_and_mask_batched(
+                (
+                    history_embeddings_padded,
+                    history_mask_padded,
+                    author_indices_padded,
+                    _, _
+                ) = get_padded_embedding_history_and_mask_batched(
                     history_embeddings=req.history_embeddings,
                     max_history_len=entry.max_history_len,
                     embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
@@ -979,18 +1036,21 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     history_embeddings_padded,
                     history_mask_padded,
                     history_author_indices_padded,
-                    history_time_deltas_hours_padded
+                    history_time_deltas_hours_padded,
+                    history_prior_cumulative_likes_padded,
                 ) = get_padded_embedding_history_and_mask_batched(
                     history_embeddings=req.history_embeddings,
                     max_history_len=entry.max_history_len,
                     embed_dim=GE_INFERENCE_CONTENT_EMBED_DIM,
                     author_indices=history_author_indices_list,
                     time_deltas_hours=time_deltas_hours_list,
+                    prior_cumulative_likes=req.history_prior_cumulative_likes,
                 )
                 history_embeddings = _tensor_from_nested_list("history_embeddings", history_embeddings_padded, DTYPE_FLOAT, entry.device)
                 history_mask = _tensor_from_nested_list("history_mask", history_mask_padded, torch.bool, entry.device)
                 history_author_indices = _tensor_from_nested_list("author_indices", history_author_indices_padded, torch.int64, entry.device)
                 history_time_deltas_hours = _tensor_from_nested_list("time_deltas_hours", history_time_deltas_hours_padded, DTYPE_FLOAT, entry.device)
+                history_prior_cumulative_likes = _tensor_from_nested_list("prior_cumulative_likes", history_prior_cumulative_likes_padded, torch.int64, entry.device)
 
                 # Candidate-side ranker features are single post vectors, with an optional batch dimension.
                 candidate_post_embeddings = _tensor_from_nested_list(
@@ -1002,9 +1062,15 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                 candidate_author_indices_list = _get_target_author_indices_for_ranker_request(req)
                 candidate_author_indices = _tensor_from_nested_list("candidate_author_dids", candidate_author_indices_list, torch.int64, entry.device)
 
+                candidate_prior_cumulative_likes_list = _get_candidate_prior_cumulative_like_counts(req)
+                candidate_prior_cumulative_likes = _tensor_from_nested_list(
+                    "candidate_prior_cumulative_likes", candidate_prior_cumulative_likes_list, torch.int64, entry.device
+                )
+
                 y = entry.module.score_candidate_matrix(
                     history_embeddings, history_mask, history_time_deltas_hours,
                     candidate_post_embeddings, history_author_indices, candidate_author_indices,
+                    history_prior_cumulative_likes, candidate_prior_cumulative_likes
                 )
                 scaled_result = _damped_min_max_scaling(y[0])
                 return scaled_result

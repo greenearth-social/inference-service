@@ -504,8 +504,10 @@ def test_ranker_request_accepts_single_history_and_candidate_post(app_request):
         history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
         history_author_dids=["author-1", "author-2"],
         history_liked_at_times=[_liked_at(1), _liked_at(2)],
+        history_prior_cumulative_likes=[10, 20],
         candidate_post_embeddings=[7.0, 8.0, 9.0],
         candidate_author_dids="candidate-author",
+        candidate_prior_cumulative_likes=30,
     )
 
 
@@ -514,8 +516,10 @@ def test_ranker_request_accepts_single_history_and_multiple_candidate_posts(app_
         history_embeddings=[[1.0, 2.0, 3.0]],
         history_author_dids=["author-1"],
         history_liked_at_times=[_liked_at(1)],
+        history_prior_cumulative_likes=[10],
         candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
         candidate_author_dids=["candidate-1", "candidate-2"],
+        candidate_prior_cumulative_likes=[30, 40],
     )
 
 
@@ -524,6 +528,7 @@ def test_ranker_request_accepts_single_empty_history_and_multiple_candidate_post
         history_embeddings=[],
         history_author_dids=[],
         history_liked_at_times=[],
+        history_prior_cumulative_likes=[],
         candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
         candidate_author_dids=["candidate-1", "candidate-2"],
     )
@@ -534,6 +539,7 @@ def test_ranker_request_accepts_nested_single_empty_history_and_multiple_candida
         history_embeddings=[[]],
         history_author_dids=[],
         history_liked_at_times=[],
+        history_prior_cumulative_likes=[],
         candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
         candidate_author_dids=["candidate-1", "candidate-2"],
     )
@@ -602,6 +608,46 @@ def test_ranker_request_rejects_candidate_author_dids_shape_mismatch(app_request
             history_liked_at_times=[_liked_at(1)],
             candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
             candidate_author_dids="candidate-author",
+        )
+
+
+def test_ranker_request_rejects_history_prior_cumulative_likes_length_mismatch(app_request):
+    with pytest.raises(ValueError, match="History length \\(2\\) must match history prior cumulative likes length \\(1\\)"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+            history_liked_at_times=[_liked_at(1), _liked_at(2)],
+            history_prior_cumulative_likes=[10],
+            candidate_post_embeddings=[7.0, 8.0, 9.0],
+        )
+
+
+def test_ranker_request_rejects_history_prior_cumulative_likes_shape_mismatch(app_request):
+    with pytest.raises(ValueError, match="Input should be a valid integer"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[1.0, 2.0, 3.0]],
+            history_liked_at_times=[_liked_at(1)],
+            history_prior_cumulative_likes=[[10]],
+            candidate_post_embeddings=[7.0, 8.0, 9.0],
+        )
+
+
+def test_ranker_request_rejects_candidate_prior_cumulative_likes_length_mismatch(app_request):
+    with pytest.raises(ValueError, match="Candidate prior cumulative likes length \\(1\\) must match number of candidates \\(2\\)"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[1.0, 2.0, 3.0]],
+            history_liked_at_times=[_liked_at(1)],
+            candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+            candidate_prior_cumulative_likes=[30],
+        )
+
+
+def test_ranker_request_rejects_single_candidate_prior_cumulative_likes_for_multiple_candidates(app_request):
+    with pytest.raises(ValueError, match="Candidate prior cumulative likes is a single int but number of candidates is 2"):
+        app_request.RankerPredictRequest(
+            history_embeddings=[[1.0, 2.0, 3.0]],
+            history_liked_at_times=[_liked_at(1)],
+            candidate_post_embeddings=[[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]],
+            candidate_prior_cumulative_likes=30,
         )
 
 
@@ -703,15 +749,22 @@ def test_get_entry_or_404_returns_500_when_registry_init_failed(app_request, mon
 def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request, monkeypatch):
     captured = {}
 
-    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None):
+    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None, prior_cumulative_likes=None):
         captured["pad_args"] = {
             "history_embeddings": history_embeddings,
             "max_history_len": max_history_len,
             "embed_dim": embed_dim,
             "author_indices": author_indices,
             "time_deltas_hours": time_deltas_hours,
+            "prior_cumulative_likes": prior_cumulative_likes,
         }
-        return [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]], [[True, False]], [[7, 0]], [[0.0, 0.0]]
+        return (
+            [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
+            [[True, False]],
+            [[7, 0]],
+            [[0.0, 0.0]],
+            [[0, 0]],
+        )
 
     def user_model(history_embeddings, history_mask, author_indices):
         captured["model_inputs"] = {
@@ -740,6 +793,7 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_CONTENT_EMBED_DIM
     assert captured["pad_args"]["author_indices"] == [7, 8]
     assert captured["pad_args"]["time_deltas_hours"] is None
+    assert captured["pad_args"]["prior_cumulative_likes"] is None
     assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
     assert captured["model_inputs"]["history_mask"] == [[True, False]]
     assert captured["model_inputs"]["author_indices"] == [[7, 0]]
@@ -907,19 +961,21 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
     captured = {}
     _freeze_app_now(app_request, monkeypatch)
 
-    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None):
+    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None, prior_cumulative_likes=None):
         captured["pad_args"] = {
             "history_embeddings": history_embeddings,
             "max_history_len": max_history_len,
             "embed_dim": embed_dim,
             "author_indices": author_indices,
             "time_deltas_hours": time_deltas_hours,
+            "prior_cumulative_likes": prior_cumulative_likes,
         }
         return (
             [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
             [[True, False]],
             [[12, 0]],
             [[2.0, 0.0]],
+            [[10, 0]],
         )
 
     class RankerModel:
@@ -931,6 +987,8 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
             candidate_post_embeddings,
             history_author_indices,
             candidate_author_indices,
+            history_prior_cumulative_likes,
+            candidate_prior_cumulative_likes,
         ):
             captured["model_inputs"] = {
                 "history_embeddings": history_embeddings.value,
@@ -939,6 +997,8 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
                 "candidate_post_embeddings": candidate_post_embeddings.value,
                 "history_author_indices": history_author_indices.value,
                 "candidate_author_indices": candidate_author_indices.value,
+                "history_prior_cumulative_likes": history_prior_cumulative_likes.value,
+                "candidate_prior_cumulative_likes": candidate_prior_cumulative_likes.value,
             }
             return app_request.torch.Tensor([[0.75, 0.5]])
 
@@ -954,8 +1014,10 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
         history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
         history_author_dids=["history-author", "unknown-history-author"],
         history_liked_at_times=[_liked_at(2), _liked_at(4)],
+        history_prior_cumulative_likes=[10, 20],
         candidate_post_embeddings=[[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]],
         candidate_author_dids=["candidate-author", "unknown-candidate-author"],
+        candidate_prior_cumulative_likes=[30, 40],
     )
     out = app_request._predict_with_entry(entry, req)
 
@@ -964,12 +1026,15 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
     assert captured["pad_args"]["embed_dim"] == app_request.GE_INFERENCE_CONTENT_EMBED_DIM
     assert captured["pad_args"]["author_indices"] == [12, app_request.AUTHOR_UNK_IDX]
     assert captured["pad_args"]["time_deltas_hours"] == [2.0, 4.0]
+    assert captured["pad_args"]["prior_cumulative_likes"] == [10, 20]
     assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
     assert captured["model_inputs"]["history_mask"] == [[True, False]]
     assert captured["model_inputs"]["history_time_deltas_hours"] == [[2.0, 0.0]]
     assert captured["model_inputs"]["candidate_post_embeddings"] == [[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]]
     assert captured["model_inputs"]["history_author_indices"] == [[12, 0]]
     assert captured["model_inputs"]["candidate_author_indices"] == [13, app_request.AUTHOR_UNK_IDX]
+    assert captured["model_inputs"]["history_prior_cumulative_likes"] == [[10, 0]]
+    assert captured["model_inputs"]["candidate_prior_cumulative_likes"] == [30, 40]
     assert out.tolist() == [1.0, -1.0]
 
 
@@ -987,6 +1052,8 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
             candidate_post_embeddings,
             history_author_indices,
             candidate_author_indices,
+            history_prior_cumulative_likes,
+            candidate_prior_cumulative_likes,
         ):
             captured["history_embeddings"] = history_embeddings.value
             captured["history_mask"] = history_mask.value
@@ -994,6 +1061,8 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
             captured["candidate_post_embeddings"] = candidate_post_embeddings.value
             captured["history_author_indices"] = history_author_indices.value
             captured["candidate_author_indices"] = candidate_author_indices.value
+            captured["history_prior_cumulative_likes"] = history_prior_cumulative_likes.value
+            captured["candidate_prior_cumulative_likes"] = candidate_prior_cumulative_likes.value
             return app_request.torch.Tensor([[0.25]])
 
     entry = app_request.LoadedModel(model_type="ranker")
@@ -1014,6 +1083,8 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
     assert captured["candidate_post_embeddings"] == [[3.0, 2.0, 1.0]]
     assert captured["history_author_indices"] == [[app_request.AUTHOR_UNK_IDX, 0, 0]]
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX]
+    assert captured["history_prior_cumulative_likes"] == [[0, 0, 0]]
+    assert captured["candidate_prior_cumulative_likes"] == [0]
     assert out.tolist() == [0.0]
 
 
@@ -1031,6 +1102,8 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
             candidate_post_embeddings,
             history_author_indices,
             candidate_author_indices,
+            history_prior_cumulative_likes,
+            candidate_prior_cumulative_likes,
         ):
             captured["history_embeddings"] = history_embeddings.value
             captured["history_mask"] = history_mask.value
@@ -1038,6 +1111,8 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
             captured["candidate_post_embeddings"] = candidate_post_embeddings.value
             captured["history_author_indices"] = history_author_indices.value
             captured["candidate_author_indices"] = candidate_author_indices.value
+            captured["history_prior_cumulative_likes"] = history_prior_cumulative_likes.value
+            captured["candidate_prior_cumulative_likes"] = candidate_prior_cumulative_likes.value
             return app_request.torch.Tensor([[0.25, 0.75]])
 
     entry = app_request.LoadedModel(model_type="ranker")
@@ -1059,6 +1134,8 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
     assert captured["candidate_post_embeddings"] == [[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]]
     assert captured["history_author_indices"] == [[app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX]]
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX, app_request.AUTHOR_UNK_IDX]
+    assert captured["history_prior_cumulative_likes"] == [[0, 0, 0]]
+    assert captured["candidate_prior_cumulative_likes"] == [0, 0]
     assert out.tolist() == [-1.0, 1.0]
 
 
@@ -1273,6 +1350,8 @@ def test_warmup_entry_ranker_uses_matrix_scorer(monkeypatch):
         (1, app.GE_INFERENCE_CONTENT_EMBED_DIM),
         [[app.AUTHOR_PAD_IDX] * 6],
         [app.AUTHOR_UNK_IDX],
+        (1, 6),
+        (1,),
     ]
 
 
