@@ -1,4 +1,5 @@
 import importlib.util
+import math
 import os
 import sys
 import types
@@ -58,7 +59,15 @@ def _install_stub_modules() -> None:
                 return DummyTensor(_apply(self.value, other_value))
 
             def numel(self):
-                return 1
+                def _count(value):
+                    if isinstance(value, list):
+                        return sum(_count(item) for item in value)
+                    return 1
+
+                return _count(self.value)
+
+            def clone(self):
+                return self._map(lambda value: value)
 
             def dim(self):
                 def _dim(v):
@@ -83,6 +92,16 @@ def _install_stub_modules() -> None:
                 return self.value
 
             def __getitem__(self, idx):
+                if isinstance(idx, DummyTensor):
+                    def _flatten(value):
+                        if isinstance(value, list):
+                            return [item for nested in value for item in _flatten(nested)]
+                        return [value]
+
+                    values = _flatten(self.value)
+                    mask = _flatten(idx.value)
+                    return DummyTensor([value for value, include in zip(values, mask) if include])
+
                 return DummyTensor(self.value[idx])
 
             def __add__(self, other):
@@ -128,6 +147,14 @@ def _install_stub_modules() -> None:
             def item(self):
                 return self.value
 
+            def any(self):
+                def _flatten(value):
+                    if isinstance(value, list):
+                        return [item for nested in value for item in _flatten(nested)]
+                    return [value]
+
+                return DummyTensor(any(_flatten(self.value)))
+
             def clamp(self, min=None, max=None):
                 def _clamp(value):
                     if min is not None and value < min:
@@ -146,6 +173,25 @@ def _install_stub_modules() -> None:
         def inference_mode():
             yield
 
+        def where(condition, if_true, if_false):
+            condition_value = condition.value if isinstance(condition, DummyTensor) else condition
+            true_value = if_true.value if isinstance(if_true, DummyTensor) else if_true
+            false_value = if_false.value if isinstance(if_false, DummyTensor) else if_false
+
+            def _apply(cond, true_item, false_item):
+                if isinstance(cond, list):
+                    return [
+                        _apply(
+                            cond_item,
+                            true_item[idx] if isinstance(true_item, list) else true_item,
+                            false_item[idx] if isinstance(false_item, list) else false_item,
+                        )
+                        for idx, cond_item in enumerate(cond)
+                    ]
+                return true_item if cond else false_item
+
+            return DummyTensor(_apply(condition_value, true_value, false_value))
+
         torch.float32 = object()
         torch.int64 = object()
         torch.bool = object()
@@ -155,6 +201,12 @@ def _install_stub_modules() -> None:
         torch.tensor = lambda value, dtype=None, device=None: DummyTensor(value)
         torch.zeros = lambda shape, dtype=None, device=None: DummyTensor(shape)
         torch.zeros_like = lambda tensor: tensor._map(lambda _value: 0.0)
+        torch.ones_like = lambda tensor: tensor._map(lambda _value: 1.0)
+        torch.full_like = lambda tensor, fill_value: tensor._map(lambda _value: fill_value)
+        torch.isfinite = lambda tensor: tensor._map(math.isfinite)
+        torch.isposinf = lambda tensor: tensor._map(lambda value: math.isinf(value) and value > 0)
+        torch.isneginf = lambda tensor: tensor._map(lambda value: math.isinf(value) and value < 0)
+        torch.where = where
         torch.ones = lambda shape, dtype=None, device=None: DummyTensor(shape)
         torch.inference_mode = inference_mode
         torch.cuda = types.SimpleNamespace(is_available=lambda: False)
@@ -939,22 +991,42 @@ def test_get_time_deltas_hours_handles_single_and_batched_times(app_request, mon
     assert app_request._get_time_deltas_hours([[], [_liked_at(3)]]) == [[], [3.0]]
 
 
-def test_min_max_scaling_maps_ranker_logits_to_unit_interval(app_request):
-    scaled = app_request._damped_min_max_scaling(app_request.torch.Tensor([0.25, 0.75]))
+def test_normalize_maps_ranker_logits_to_unit_interval(app_request):
+    scaled = app_request._normalize(app_request.torch.Tensor([0.25, 0.75]))
 
-    assert scaled.tolist() == [-1.0, 1.0]
-
-
-def test_min_max_scaling_preserves_candidate_order(app_request):
-    scaled = app_request._damped_min_max_scaling(app_request.torch.Tensor([0.5, 0.25, 0.75]))
-
-    assert scaled.tolist() == [0.0, -1.0, 1.0]
+    assert scaled.tolist() == [0.0, 1.0]
 
 
-def test_min_max_scaling_returns_zero_for_equal_ranker_logits(app_request):
-    scaled = app_request._damped_min_max_scaling(app_request.torch.Tensor([0.5, 0.5]))
+def test_normalize_preserves_candidate_order(app_request):
+    scaled = app_request._normalize(app_request.torch.Tensor([0.5, 0.25, 0.75]))
 
-    assert scaled.tolist() == [0.0, 0.0]
+    assert scaled.tolist() == [0.5, 0.0, 1.0]
+
+
+def test_normalize_returns_neutral_score_for_equal_ranker_logits(app_request):
+    scaled = app_request._normalize(app_request.torch.Tensor([0.5, 0.5]))
+
+    assert scaled.tolist() == [0.5, 0.5]
+
+
+def test_normalize_returns_empty_scores_for_empty_ranker_logits(app_request):
+    scaled = app_request._normalize(app_request.torch.Tensor([]))
+
+    assert scaled.tolist() == []
+
+
+def test_normalize_neutralizes_nan_and_bounds_infinite_logits(app_request):
+    scaled = app_request._normalize(
+        app_request.torch.Tensor([float("-inf"), 1.0, 3.0, float("inf"), float("nan")])
+    )
+
+    assert scaled.tolist() == [0.0, 0.0, 1.0, 1.0, 0.5]
+
+
+def test_normalize_returns_neutral_scores_when_no_finite_bounds_exist(app_request):
+    scaled = app_request._normalize(app_request.torch.Tensor([float("nan"), float("inf")]))
+
+    assert scaled.tolist() == [0.5, 0.5]
 
 
 def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_inputs(app_request, monkeypatch):
@@ -1035,7 +1107,7 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
     assert captured["model_inputs"]["candidate_author_indices"] == [13, app_request.AUTHOR_UNK_IDX]
     assert captured["model_inputs"]["history_prior_cumulative_likes"] == [[10, 0]]
     assert captured["model_inputs"]["candidate_prior_cumulative_likes"] == [30, 40]
-    assert out.tolist() == [1.0, -1.0]
+    assert out.tolist() == [1.0, 0.0]
 
 
 def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
@@ -1085,7 +1157,7 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX]
     assert captured["history_prior_cumulative_likes"] == [[0, 0, 0]]
     assert captured["candidate_prior_cumulative_likes"] == [0]
-    assert out.tolist() == [0.0]
+    assert out.tolist() == [0.5]
 
 
 def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candidates(app_request, monkeypatch):
@@ -1136,7 +1208,7 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX, app_request.AUTHOR_UNK_IDX]
     assert captured["history_prior_cumulative_likes"] == [[0, 0, 0]]
     assert captured["candidate_prior_cumulative_likes"] == [0, 0]
-    assert out.tolist() == [-1.0, 1.0]
+    assert out.tolist() == [0.0, 1.0]
 
 
 def test_ranker_request_rejects_liked_at_length_mismatch(app_request):
@@ -1325,6 +1397,7 @@ def test_load_entry_accepts_ranker_with_matrix_scorer(monkeypatch):
 
 
 def test_warmup_entry_ranker_uses_matrix_scorer(monkeypatch):
+    monkeypatch.setenv("GE_INFERENCE_WARMUP", "1")
     app = _load_app_module("inference_service_ranker_warmup_matrix_tests", model_types="ranker")
     captured = {}
 

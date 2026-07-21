@@ -949,13 +949,33 @@ def _get_candidate_prior_cumulative_like_counts(
     return [0]
 
 
-def _damped_min_max_scaling(logits: torch.Tensor) -> torch.Tensor:
-    lo = logits.min()
-    hi = logits.max()
-    span = hi - lo
-    if span.abs().item() < 1e-6:
-        return torch.zeros_like(logits)
-    return (2.0 * (logits - lo) / span - 1.0).clamp(-1.0, 1.0)
+def _normalize(logits: torch.Tensor) -> torch.Tensor:
+    if logits.numel() == 0:
+        return logits.clone()
+
+    normalized = torch.full_like(logits, 0.5)
+    finite_mask = torch.isfinite(logits)
+    has_finite = finite_mask.any().item()
+
+    if has_finite:
+        finite_logits = logits[finite_mask]
+        lo = finite_logits.min()
+        hi = finite_logits.max()
+        span = hi - lo
+        if span.abs().item() >= 1e-6:
+            scaled_logits = ((logits - lo) / span).clamp(0.0, 1.0)
+            normalized = torch.where(finite_mask, scaled_logits, normalized)
+
+    pos_inf_mask = torch.isposinf(logits)
+    neg_inf_mask = torch.isneginf(logits)
+    should_apply_inf_bounds = has_finite or (
+        pos_inf_mask.any().item() and neg_inf_mask.any().item()
+    )
+    if should_apply_inf_bounds:
+        normalized = torch.where(pos_inf_mask, torch.ones_like(normalized), normalized)
+        normalized = torch.where(neg_inf_mask, torch.zeros_like(normalized), normalized)
+
+    return normalized.clamp(0.0, 1.0)
 
 
 def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
@@ -1072,7 +1092,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     candidate_post_embeddings, history_author_indices, candidate_author_indices,
                     history_prior_cumulative_likes, candidate_prior_cumulative_likes
                 )
-                scaled_result = _damped_min_max_scaling(y[0])
+                scaled_result = _normalize(y[0])
                 return scaled_result
             case _:
                 assert_never(entry.model_type)
