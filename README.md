@@ -235,6 +235,9 @@ Or with multiple candidates:
 Ranker requests may use `history_embeddings: []` or `history_embeddings: [[]]`
 for an empty single-user history. They do not accept batched user histories.
 Ranker responses are flat lists of candidate scores, one score per candidate.
+Scores are request-relative normalized ranker outputs in `[0, 1]`, where
+higher is better. Tied or otherwise degenerate ranker logits produce neutral
+`0.5` scores.
 
 ## Running Tests
 
