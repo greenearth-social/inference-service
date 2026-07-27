@@ -93,6 +93,7 @@ def _install_stub_modules() -> None:
 
             def __getitem__(self, idx):
                 if isinstance(idx, DummyTensor):
+
                     def _flatten(value):
                         if isinstance(value, list):
                             return [item for nested in value for item in _flatten(nested)]
@@ -100,7 +101,9 @@ def _install_stub_modules() -> None:
 
                     values = _flatten(self.value)
                     mask = _flatten(idx.value)
-                    return DummyTensor([value for value, include in zip(values, mask) if include])
+                    return DummyTensor(
+                        [value for value, include in zip(values, mask, strict=False) if include]
+                    )
 
                 return DummyTensor(self.value[idx])
 
