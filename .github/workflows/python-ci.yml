@@ -13,7 +13,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
 
     - name: Set up Python
       uses: actions/setup-python@v6
@@ -25,6 +25,15 @@ jobs:
 
     - name: Install dependencies
       run: pipenv install --dev
+
+    - name: Lint (ruff)
+      run: pipenv run ruff check .
+
+    - name: Format check (ruff)
+      run: pipenv run ruff format --check .
+
+    - name: Type check (pyright)
+      run: pipenv run pyright
 
     - name: Run tests
       run: pipenv run pytest -v
