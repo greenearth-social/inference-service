@@ -11,9 +11,13 @@ clearml = "*"
 google-cloud-storage = "*"
 pyarrow = "*"
 shared = {git = "https://github.com/greenearth-social/engagement-prediction.git", ref = "main"}
+opentelemetry-api = "*"
+opentelemetry-sdk = "*"
+opentelemetry-exporter-gcp-monitoring = "*"
 
 [dev-packages]
 pytest = "*"
+pytest-asyncio = "*"
 
 [requires]
 python_version = "3.11"

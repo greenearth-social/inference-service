@@ -1249,6 +1249,85 @@ def test_predict_with_entry_rejects_ranker_request_type_mismatch(app_request):
     assert "expects a ranker request body" in str(exc_info.value.detail)
 
 
+def test_predict_model_records_duration_metric(app_request, monkeypatch):
+    class _RecordingCollector:
+        def __init__(self):
+            self.records = []
+
+        def record(self, name, value, **attributes):
+            self.records.append((name, value, attributes))
+
+    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None, prior_cumulative_likes=None):
+        return (
+            [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]],
+            [[True, False]],
+            [[7, 0]],
+            [[0.0, 0.0]],
+            [[0, 0]],
+        )
+
+    def user_model(history_embeddings, history_mask, author_indices):
+        return app_request.torch.Tensor([[42.0]])
+
+    monkeypatch.setattr(app_request, "get_padded_embedding_history_and_mask_batched", fake_pad)
+    _set_author_idx_map(app_request, monkeypatch, {"author-1": 7, "author-2": 8})
+
+    entry = app_request.LoadedModel(model_type="user-tower")
+    entry.module = user_model
+    entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 8
+
+    monkeypatch.setattr(app_request, "_models_initialized", True)
+    monkeypatch.setattr(app_request, "_models_init_error", None)
+    monkeypatch.setattr(app_request, "_models", {"user-tower": entry})
+
+    collector = _RecordingCollector()
+    app_request.set_metric_collector(collector)
+    try:
+        req = app_request.UserTowerPredictRequest(
+            history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
+            history_author_dids=["author-1", "author-2"],
+        )
+        app_request.predict_model("user-tower", req)
+    finally:
+        app_request.set_metric_collector(None)
+
+    [record] = [r for r in collector.records if r[0] == "inference.predict.duration_ms"]
+    _, value, attrs = record
+    assert value >= 0
+    assert attrs == {"model_name": "user-tower"}
+
+
+def test_predict_model_records_duration_metric_on_failure(app_request, monkeypatch):
+    class _RecordingCollector:
+        def __init__(self):
+            self.records = []
+
+        def record(self, name, value, **attributes):
+            self.records.append((name, value, attributes))
+
+    monkeypatch.setattr(app_request, "_models_initialized", True)
+    monkeypatch.setattr(app_request, "_models_init_error", None)
+    monkeypatch.setattr(app_request, "_models", {})
+
+    collector = _RecordingCollector()
+    app_request.set_metric_collector(collector)
+    try:
+        req = app_request.UserTowerPredictRequest(
+            history_embeddings=[[9.0, 8.0, 7.0]],
+            history_author_dids=["author-1"],
+        )
+        with pytest.raises(app_request.HTTPException):
+            app_request.predict_model("nope", req)
+    finally:
+        app_request.set_metric_collector(None)
+
+    [record] = [r for r in collector.records if r[0] == "inference.predict.duration_ms"]
+    _, value, attrs = record
+    assert value >= 0
+    assert attrs == {"model_name": "nope"}
+
+
 def test_require_ready_raises_503_when_model_not_loaded(app_request, monkeypatch):
     entry = app_request.LoadedModel(model_type="user-tower")
     monkeypatch.setattr(app_request, "ensure_models_loaded", lambda: None)
