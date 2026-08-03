@@ -206,3 +206,66 @@ def test_set_and_get_metric_collector():
 async def test_shutdown_does_not_raise():
     collector, _ = _make_collector()
     await collector.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Histogram bucket boundaries
+#
+# Ported from the api's metrics module: the OTel defaults leave four buckets
+# above 1s, so a predict-latency p95 in the serving range is an interpolation
+# across a multi-second bucket.
+# ---------------------------------------------------------------------------
+
+from metrics import (  # noqa: E402
+    LATENCY_MS_BOUNDARIES,
+    histogram_boundaries,
+)
+
+
+def test_predict_duration_uses_latency_boundaries():
+    assert histogram_boundaries("inference.predict.duration_ms") == LATENCY_MS_BOUNDARIES
+
+
+def test_unknown_metric_falls_back_to_sdk_default():
+    assert histogram_boundaries("something.unrecognised") is None
+
+
+def test_predict_histogram_exports_custom_bounds():
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    collector = MetricCollector._from_reader(reader, "inference", "test")
+    collector.record("inference.predict.duration_ms", 2425.0, model_name="user-tower")
+
+    [metric] = [
+        m
+        for rm in reader.get_metrics_data().resource_metrics
+        for sm in rm.scope_metrics
+        for m in sm.metrics
+    ]
+    [point] = list(metric.data.data_points)
+    assert tuple(point.explicit_bounds) == tuple(LATENCY_MS_BOUNDARIES)
+
+
+def test_multi_second_values_resolve_to_sub_500ms_buckets():
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    reader = InMemoryMetricReader()
+    collector = MetricCollector._from_reader(reader, "inference", "test")
+    for value in (2425.0, 4881.0):
+        collector.record("inference.predict.duration_ms", value)
+
+    [metric] = [
+        m
+        for rm in reader.get_metrics_data().resource_metrics
+        for sm in rm.scope_metrics
+        for m in sm.metrics
+    ]
+    [point] = list(metric.data.data_points)
+    bounds = list(point.explicit_bounds)
+    occupied = [i for i, count in enumerate(point.bucket_counts) if count]
+    assert len(occupied) == 2
+    for index in occupied:
+        lower = bounds[index - 1] if index else 0
+        upper = bounds[index] if index < len(bounds) else float("inf")
+        assert upper - lower <= 500
