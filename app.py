@@ -29,11 +29,23 @@ from shared.input_data_helpers import (
     HistoryEmbeddingsShape,
 )
 
+from metrics import MetricCollector, get_metric_collector, set_metric_collector
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     ensure_models_loaded()
-    yield
+    collector = MetricCollector(
+        service_name="greenearth-inference",
+        env=os.environ.get("GE_ENVIRONMENT", "dev"),
+        export_interval_sec=int(os.environ.get("GE_METRICS_EXPORT_INTERVAL_SEC", "60")),
+    )
+    set_metric_collector(collector)
+    try:
+        yield
+    finally:
+        set_metric_collector(None)
+        await collector.shutdown()
 
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
@@ -1214,11 +1226,21 @@ def list_models() -> dict:
 
 @app.post("/models/{model_name}/predict", dependencies=[Security(_require_api_key)])
 def predict_model(model_name: str, req: PredictRequest = Body(...)) -> dict:
-    entry = _get_entry_or_404(model_name)
+    start = time.monotonic()
     try:
-        y = _predict_with_entry(entry, req)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Inference failed: {e}")
-    return {"outputs": _to_python(y), "model_type": entry.model_type, "model_uuid": entry.model_uuid}
+        entry = _get_entry_or_404(model_name)
+        try:
+            y = _predict_with_entry(entry, req)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Inference failed: {e}")
+        return {"outputs": _to_python(y), "model_type": entry.model_type, "model_uuid": entry.model_uuid}
+    finally:
+        collector = get_metric_collector()
+        if collector is not None:
+            collector.record(
+                "inference.predict.duration_ms",
+                (time.monotonic() - start) * 1000,
+                model_name=model_name,
+            )
