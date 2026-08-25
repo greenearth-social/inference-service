@@ -30,6 +30,11 @@ GE_INFERENCE_CONTENT_EMBED_DIM="${GE_INFERENCE_CONTENT_EMBED_DIM:-384}"
 GE_INFERENCE_MAX_BATCH="${GE_INFERENCE_MAX_BATCH:-0}"
 GE_INFERENCE_MODEL_CACHE_DIR="${GE_INFERENCE_MODEL_CACHE_DIR:-/tmp/model_cache}"
 
+# Short git sha of the deployed code, resolved by require_clean_worktree().
+# Stamped onto the Cloud Run revision (env var + label) so we can identify what
+# code is live and pick rollback targets (see issue greenearth-social/api#181).
+GIT_SHA=""
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -51,6 +56,29 @@ log_error() {
 
 log_build() {
     echo -e "${BLUE}[BUILD]${NC} $1"
+}
+
+require_clean_worktree() {
+    log_info "Verifying git working tree is clean..."
+
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        log_error "Not inside a git repository — cannot verify the deployed code."
+        log_error "Run deploy.sh from a checkout of the inference-service repo."
+        exit 1
+    fi
+
+    # Refuse to deploy with uncommitted changes so the stamped git sha always
+    # matches the code that ships. Deploying an unpushed branch is fine — only a
+    # dirty tree is rejected.
+    if [ -n "$(git status --porcelain)" ]; then
+        log_error "Working tree has uncommitted changes. Commit or stash them before deploying"
+        log_error "so the deployed git sha reflects the running code."
+        git status --short
+        exit 1
+    fi
+
+    GIT_SHA="$(git rev-parse --short=7 HEAD)"
+    log_info "Deploying git sha: $GIT_SHA ($(git rev-parse --abbrev-ref HEAD))"
 }
 
 models_include() {
@@ -299,6 +327,7 @@ GE_INFERENCE_MODEL_CACHE_DIR: "$GE_INFERENCE_MODEL_CACHE_DIR"
 GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI: "$GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI"
 GE_INFERENCE_PREFER_CUDA: "0"
 GE_INFERENCE_WARMUP: "0"
+GE_GIT_SHA: "$GIT_SHA"
 EOF
 
     local deploy_cmd="gcloud run deploy $service_name"
@@ -322,14 +351,43 @@ EOF
     deploy_cmd="$deploy_cmd --min-instances=$GE_INFERENCE_MIN_INSTANCES"
     deploy_cmd="$deploy_cmd --max-instances=$GE_INFERENCE_MAX_INSTANCES"
 
+    # Tag the service/revision with the git sha so past deployments are
+    # identifiable when picking a rollback target (see scripts/rollback.sh).
+    deploy_cmd="$deploy_cmd --labels=git-sha=$GIT_SHA"
+
     log_build "Executing: $deploy_cmd"
     eval "$deploy_cmd"
 
     log_info "✓ $service_name deployed successfully"
 
+    reset_traffic_to_latest "$service_name"
+
     local service_url
     service_url=$(gcloud run services describe "$service_name" --region="$GE_GCP_REGION" --format="value(status.url)")
     log_info "Service URL: $service_url"
+}
+
+# A rollback (scripts/rollback.sh) pins traffic to a named revision, which takes
+# LATEST out of the traffic split — after that, deploying would create a
+# perfectly healthy revision that serves nothing. Resetting to LATEST here makes
+# "deploy the fix" the way out of a rolled-back state, with no extra step to
+# remember. On a normal deploy this is a no-op. It runs only after the deploy
+# above succeeded, so a failed build leaves traffic where the rollback put it.
+reset_traffic_to_latest() {
+    local service_name="$1"
+
+    log_info "Pointing traffic at the latest revision..."
+
+    if ! gcloud run services update-traffic "$service_name" \
+        --region="$GE_GCP_REGION" \
+        --project="$GE_GCP_PROJECT_ID" \
+        --to-latest \
+        --quiet > /dev/null; then
+        log_error "Deployed successfully, but could not point traffic at the new revision."
+        log_error "The previous revision is still serving. Retry with:"
+        log_error "  gcloud run services update-traffic $service_name --region=$GE_GCP_REGION --to-latest"
+        exit 1
+    fi
 }
 
 main() {
@@ -348,6 +406,7 @@ main() {
     log_info "Max batch:       $GE_INFERENCE_MAX_BATCH"
     log_info "Model cache dir: $GE_INFERENCE_MODEL_CACHE_DIR"
 
+    require_clean_worktree
     validate_config
     generate_requirements
     verify_vpc_connector
