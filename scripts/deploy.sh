@@ -17,6 +17,9 @@ GE_ENABLE_INFERENCE_DOMAIN_MAPPING="${GE_ENABLE_INFERENCE_DOMAIN_MAPPING:-true}"
 GE_INFERENCE_DOMAIN="${GE_INFERENCE_DOMAIN:-}"
 GE_INFERENCE_MIN_INSTANCES="${GE_INFERENCE_MIN_INSTANCES:-1}"
 GE_INFERENCE_MAX_INSTANCES="${GE_INFERENCE_MAX_INSTANCES:-1}"
+# Preserve the current stage/prod baseline unless a deployment explicitly
+# overrides it. Tune this alongside instance limits using representative load.
+GE_INFERENCE_CONCURRENCY="${GE_INFERENCE_CONCURRENCY:-160}"
 
 # Multi-model config — required, no defaults
 GE_INFERENCE_MODELS="${GE_INFERENCE_MODELS:-}"
@@ -183,6 +186,12 @@ validate_config() {
         exit 1
     fi
 
+    if [ -z "$GE_INFERENCE_CONCURRENCY" ] || ! [[ "$GE_INFERENCE_CONCURRENCY" =~ ^([1-9][0-9]{0,2}|1000)$ ]]; then
+        log_error "GE_INFERENCE_CONCURRENCY must be an integer between 1 and 1000."
+        log_error "Example: GE_INFERENCE_CONCURRENCY=2 ./deploy.sh"
+        exit 1
+    fi
+
     if [ "$GE_ENABLE_INFERENCE_DOMAIN_MAPPING" = "true" ]; then
         log_info "Inference domain mapping enabled for: $(resolve_inference_domain)"
     else
@@ -321,6 +330,7 @@ EOF
     deploy_cmd="$deploy_cmd --timeout=120"
     deploy_cmd="$deploy_cmd --min-instances=$GE_INFERENCE_MIN_INSTANCES"
     deploy_cmd="$deploy_cmd --max-instances=$GE_INFERENCE_MAX_INSTANCES"
+    deploy_cmd="$deploy_cmd --concurrency=$GE_INFERENCE_CONCURRENCY"
 
     log_build "Executing: $deploy_cmd"
     eval "$deploy_cmd"
@@ -347,6 +357,9 @@ main() {
     log_info "Embed dimension: $GE_INFERENCE_CONTENT_EMBED_DIM"
     log_info "Max batch:       $GE_INFERENCE_MAX_BATCH"
     log_info "Model cache dir: $GE_INFERENCE_MODEL_CACHE_DIR"
+    log_info "Min instances:   $GE_INFERENCE_MIN_INSTANCES"
+    log_info "Max instances:   $GE_INFERENCE_MAX_INSTANCES"
+    log_info "Concurrency:     $GE_INFERENCE_CONCURRENCY"
 
     validate_config
     generate_requirements
@@ -428,6 +441,10 @@ while [[ $# -gt 0 ]]; do
             GE_INFERENCE_MAX_INSTANCES="$2"
             shift 2
             ;;
+        --concurrency)
+            GE_INFERENCE_CONCURRENCY="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -450,6 +467,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --disable-domain-mapping        Skip domain mapping reconciliation"
             echo "  --min-instances N               Minimum Cloud Run instances (default: 1)"
             echo "  --max-instances N               Maximum Cloud Run instances (default: 1)"
+            echo "  --concurrency N                 Max concurrent requests per instance (default: 160)"
             echo "  --help                          Show this help message"
             echo ""
             echo "Environment variables:"
@@ -470,6 +488,7 @@ while [[ $# -gt 0 ]]; do
             echo "  GE_INFERENCE_DOMAIN                      Custom mapped domain"
             echo "  GE_INFERENCE_MIN_INSTANCES               Minimum Cloud Run instances (default: 1)"
             echo "  GE_INFERENCE_MAX_INSTANCES               Maximum Cloud Run instances (default: 1)"
+            echo "  GE_INFERENCE_CONCURRENCY                 Max concurrent requests per instance (default: 160)"
             echo ""
             echo "Examples:"
             echo "  $0 --environment stage \\"
