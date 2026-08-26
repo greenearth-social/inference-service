@@ -396,9 +396,9 @@ Common deployment configuration:
 - `GE_GCP_PROJECT_ID`: GCP project ID
 - `GE_GCP_REGION`: GCP region, default `us-east1`
 - `GE_ENVIRONMENT`: environment name, default `stage`
-- `GE_INFERENCE_MIN_INSTANCES`: minimum Cloud Run instances, default `1`
-- `GE_INFERENCE_MAX_INSTANCES`: maximum Cloud Run instances, default `1`
-- `GE_INFERENCE_CONCURRENCY`: maximum concurrent requests per Cloud Run instance, default `160`
+- `GE_INFERENCE_MIN_INSTANCES`: minimum Cloud Run instances, default `2`
+- `GE_INFERENCE_MAX_INSTANCES`: maximum Cloud Run instances, default `8`
+- `GE_INFERENCE_CONCURRENCY`: maximum concurrent requests per Cloud Run instance, default `2`
 
 Inference configuration:
 

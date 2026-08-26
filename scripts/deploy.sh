@@ -17,8 +17,8 @@ GE_ENABLE_INFERENCE_DOMAIN_MAPPING="${GE_ENABLE_INFERENCE_DOMAIN_MAPPING:-true}"
 GE_INFERENCE_DOMAIN="${GE_INFERENCE_DOMAIN:-}"
 GE_INFERENCE_MIN_INSTANCES="${GE_INFERENCE_MIN_INSTANCES:-2}"
 GE_INFERENCE_MAX_INSTANCES="${GE_INFERENCE_MAX_INSTANCES:-8}"
-# Load test found that concurrency 2 produces 64% more tput for only about
-# 22% more latency. At concurrency 3 the perf tradeoff is not worth it
+# Selected from the 2026-08-26 stage ranker benchmark on 2 vCPU;
+# concurrency 2 was the best measured throughput/latency tradeoff.
 GE_INFERENCE_CONCURRENCY="${GE_INFERENCE_CONCURRENCY:-2}"
 
 # Multi-model config — required, no defaults
