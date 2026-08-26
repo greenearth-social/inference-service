@@ -344,9 +344,9 @@ GE_INFERENCE_RANKER_MAX_HISTORY_LEN=128 \
 The deploy script configures Cloud Run revision-level scaling and request
 concurrency. Its defaults preserve the current deployment baseline:
 
-- minimum instances: `1`
-- maximum instances: `1`
-- maximum concurrent requests per instance: `160`
+- minimum instances: `2`
+- maximum instances: `8`
+- maximum concurrent requests per instance: `2`
 
 Override these values with `--min-instances`, `--max-instances`, and
 `--concurrency`, or with the corresponding environment variables. For example,
