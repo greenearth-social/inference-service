@@ -339,6 +339,34 @@ GE_INFERENCE_RANKER_MAX_HISTORY_LEN=128 \
 ./scripts/deploy.sh
 ```
 
+### Scaling and Concurrency
+
+The deploy script configures Cloud Run revision-level scaling and request
+concurrency. Its defaults preserve the current deployment baseline:
+
+- minimum instances: `2`
+- maximum instances: `8`
+- maximum concurrent requests per instance: `2`
+
+Override these values with `--min-instances`, `--max-instances`, and
+`--concurrency`, or with the corresponding environment variables. For example,
+to compare per-instance performance at concurrency `2`, keep the service pinned
+to one instance so autoscaling does not affect the measurement:
+
+```bash
+# With the required model configuration already exported:
+GE_INFERENCE_MIN_INSTANCES=1 \
+GE_INFERENCE_MAX_INSTANCES=1 \
+GE_INFERENCE_CONCURRENCY=2 \
+./scripts/deploy.sh
+```
+
+Cloud Run concurrency is the maximum number of in-flight HTTP requests routed
+to one container instance, not a requests-per-second limit. After selecting a
+stable per-instance concurrency through stage load testing, raise
+`--max-instances` to test horizontal autoscaling. Once a value is validated,
+update the default so later deployments do not silently restore the baseline.
+
 The two tower manifest (`two_tower_serving_manifest.json`) is produced by the
 engagement-prediction training pipeline and uploaded to the model bucket. It
 contains the GCS URIs and ClearML model IDs for both towers. `GE_INFERENCE_MODELS`
@@ -368,6 +396,9 @@ Common deployment configuration:
 - `GE_GCP_PROJECT_ID`: GCP project ID
 - `GE_GCP_REGION`: GCP region, default `us-east1`
 - `GE_ENVIRONMENT`: environment name, default `stage`
+- `GE_INFERENCE_MIN_INSTANCES`: minimum Cloud Run instances, default `2`
+- `GE_INFERENCE_MAX_INSTANCES`: maximum Cloud Run instances, default `8`
+- `GE_INFERENCE_CONCURRENCY`: maximum concurrent requests per Cloud Run instance, default `2`
 
 Inference configuration:
 
