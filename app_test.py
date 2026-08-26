@@ -4,12 +4,12 @@ import os
 import sys
 import types
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
-
 
 REPO_ROOT = Path(__file__).resolve().parents[0]
 APP_PATH = REPO_ROOT / "app.py"
@@ -19,7 +19,7 @@ DEFAULT_RANKER_AUTHOR_IDX_MAP_URI = "gs://test-bucket/ranker_author_idx.parquet"
 
 def _install_stub_modules() -> None:
     if "clearml" not in sys.modules:
-        clearml = types.ModuleType("clearml")
+        clearml: Any = types.ModuleType("clearml")
 
         class FakeModel:
             def __init__(self, model_id=None):
@@ -32,10 +32,10 @@ def _install_stub_modules() -> None:
         sys.modules["clearml"] = clearml
 
     if "torch" not in sys.modules:
-        torch = types.ModuleType("torch")
+        torch: Any = types.ModuleType("torch")
 
         class DummyTensor:
-            def __init__(self, value):
+            def __init__(self, value: Any):
                 self.value = value
 
             def _map(self, fn):
@@ -93,6 +93,7 @@ def _install_stub_modules() -> None:
 
             def __getitem__(self, idx):
                 if isinstance(idx, DummyTensor):
+
                     def _flatten(value):
                         if isinstance(value, list):
                             return [item for nested in value for item in _flatten(nested)]
@@ -100,7 +101,9 @@ def _install_stub_modules() -> None:
 
                     values = _flatten(self.value)
                     mask = _flatten(idx.value)
-                    return DummyTensor([value for value, include in zip(values, mask) if include])
+                    return DummyTensor(
+                        [value for value, include in zip(values, mask, strict=False) if include]
+                    )
 
                 return DummyTensor(self.value[idx])
 
@@ -210,7 +213,9 @@ def _install_stub_modules() -> None:
         torch.ones = lambda shape, dtype=None, device=None: DummyTensor(shape)
         torch.inference_mode = inference_mode
         torch.cuda = types.SimpleNamespace(is_available=lambda: False)
-        torch.jit = types.SimpleNamespace(ScriptModule=type("ScriptModule", (), {}), load=lambda *args, **kwargs: None)
+        torch.jit = types.SimpleNamespace(
+            ScriptModule=type("ScriptModule", (), {}), load=lambda *args, **kwargs: None
+        )
         sys.modules["torch"] = torch
 
 
@@ -225,7 +230,7 @@ def _load_app_module(
     ranker_max_history_len: int | None = 6,
     ranker_manifest_uri: str | None = None,
     model_types: str = "post-tower,user-tower",
-):
+) -> Any:
     _install_stub_modules()
 
     os.environ["GE_INFERENCE_MAX_BATCH"] = str(max_batch)
@@ -253,15 +258,15 @@ def _load_app_module(
     os.environ.pop("GE_INFERENCE_AUTHOR_MAP_URI", None)
 
     spec = importlib.util.spec_from_file_location(module_name, APP_PATH)
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
 
 def _install_fake_pyarrow(monkeypatch, rows):
-    pyarrow = types.ModuleType("pyarrow")
-    parquet = types.ModuleType("pyarrow.parquet")
+    pyarrow: Any = types.ModuleType("pyarrow")
+    parquet: Any = types.ModuleType("pyarrow.parquet")
 
     class FakeColumn:
         def __init__(self, values):
@@ -294,7 +299,11 @@ def _set_author_idx_map(app, monkeypatch, idx_by_did, name="two-tower"):
     monkeypatch.setattr(
         app,
         "_author_idx_maps",
-        {name: app.AuthorIdxMap(name=name, uri="gs://test-bucket/author_idx.parquet", idx_by_did=idx_by_did)},
+        {
+            name: app.AuthorIdxMap(
+                name=name, uri="gs://test-bucket/author_idx.parquet", idx_by_did=idx_by_did
+            )
+        },
     )
 
 
@@ -314,7 +323,7 @@ def app_fixed_dim():
 
 
 def _liked_at(hours_ago: float) -> datetime:
-    return datetime(2026, 1, 1, 12, tzinfo=timezone.utc) - timedelta(hours=hours_ago)
+    return datetime(2026, 1, 1, 12, tzinfo=UTC) - timedelta(hours=hours_ago)
 
 
 def _freeze_app_now(app, monkeypatch, now=None) -> datetime:
@@ -352,7 +361,10 @@ def test_classifies_batch_with_empty_first_user_as_batched_history(app_shape):
 
 
 def test_classifies_three_dimensional_input_as_batched_history(app_shape):
-    assert app_shape.classify_history_embeddings_shape([[[1.0, 2.0]], [[3.0, 4.0]]]) == "batched_history"
+    assert (
+        app_shape.classify_history_embeddings_shape([[[1.0, 2.0]], [[3.0, 4.0]]])
+        == "batched_history"
+    )
 
 
 def test_rejects_non_list_top_level(app_shape):
@@ -366,7 +378,9 @@ def test_rejects_top_level_list_that_does_not_contain_lists(app_shape):
 
 
 def test_records_missing_author_idx_map_uri_as_init_error():
-    app = _load_app_module("inference_service_app_missing_author_map_tests", author_idx_map_uri=None)
+    app = _load_app_module(
+        "inference_service_app_missing_author_map_tests", author_idx_map_uri=None
+    )
 
     app._ensure_author_idx_maps_loaded()
 
@@ -457,7 +471,9 @@ def test_rejects_single_history_with_mismatched_embedding_dimensions(app_request
         )
 
 
-def test_rejects_single_history_with_mismatched_embedding_dimensions_without_author_dids(app_request):
+def test_rejects_single_history_with_mismatched_embedding_dimensions_without_author_dids(
+    app_request,
+):
     with pytest.raises(ValueError, match="embedding dim must be 3"):
         app_request.UserTowerPredictRequest(
             history_embeddings=[[1.0, 2.0], [3.0]],
@@ -507,7 +523,9 @@ def test_rejects_zero_width_embedding_row(app_fixed_dim):
 
 
 def test_post_tower_request_accepts_unbatched_and_batched(app_request):
-    app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
+    app_request.PostTowerPredictRequest(
+        post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1"
+    )
     app_request.PostTowerPredictRequest(
         post_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
         target_author_dids=["author-1", "author-2"],
@@ -546,9 +564,13 @@ def test_post_tower_request_rejects_author_did_shape_mismatch(app_request):
 
 
 def test_post_tower_request_enforces_embed_dim(app_fixed_dim):
-    app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
+    app_fixed_dim.PostTowerPredictRequest(
+        post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1"
+    )
     with pytest.raises(ValueError, match="expected D=3"):
-        app_fixed_dim.PostTowerPredictRequest(post_embeddings=[1.0, 2.0], target_author_dids="author-1")
+        app_fixed_dim.PostTowerPredictRequest(
+            post_embeddings=[1.0, 2.0], target_author_dids="author-1"
+        )
 
 
 def test_ranker_request_accepts_single_history_and_candidate_post(app_request):
@@ -586,7 +608,9 @@ def test_ranker_request_accepts_single_empty_history_and_multiple_candidate_post
     )
 
 
-def test_ranker_request_accepts_nested_single_empty_history_and_multiple_candidate_posts(app_request):
+def test_ranker_request_accepts_nested_single_empty_history_and_multiple_candidate_posts(
+    app_request,
+):
     app_request.RankerPredictRequest(
         history_embeddings=[[]],
         history_author_dids=[],
@@ -664,7 +688,10 @@ def test_ranker_request_rejects_candidate_author_dids_shape_mismatch(app_request
 
 
 def test_ranker_request_rejects_history_prior_cumulative_likes_length_mismatch(app_request):
-    with pytest.raises(ValueError, match="History length \\(2\\) must match history prior cumulative likes length \\(1\\)"):
+    with pytest.raises(
+        ValueError,
+        match="History length \\(2\\) must match history prior cumulative likes length \\(1\\)",
+    ):
         app_request.RankerPredictRequest(
             history_embeddings=[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
             history_liked_at_times=[_liked_at(1), _liked_at(2)],
@@ -684,7 +711,13 @@ def test_ranker_request_rejects_history_prior_cumulative_likes_shape_mismatch(ap
 
 
 def test_ranker_request_rejects_candidate_prior_cumulative_likes_length_mismatch(app_request):
-    with pytest.raises(ValueError, match="Candidate prior cumulative likes length \\(1\\) must match number of candidates \\(2\\)"):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Candidate prior cumulative likes length \\(1\\) must match "
+            "number of candidates \\(2\\)"
+        ),
+    ):
         app_request.RankerPredictRequest(
             history_embeddings=[[1.0, 2.0, 3.0]],
             history_liked_at_times=[_liked_at(1)],
@@ -693,8 +726,13 @@ def test_ranker_request_rejects_candidate_prior_cumulative_likes_length_mismatch
         )
 
 
-def test_ranker_request_rejects_single_candidate_prior_cumulative_likes_for_multiple_candidates(app_request):
-    with pytest.raises(ValueError, match="Candidate prior cumulative likes is a single int but number of candidates is 2"):
+def test_ranker_request_rejects_single_candidate_prior_cumulative_likes_for_multiple_candidates(
+    app_request,
+):
+    with pytest.raises(
+        ValueError,
+        match="Candidate prior cumulative likes is a single int but number of candidates is 2",
+    ):
         app_request.RankerPredictRequest(
             history_embeddings=[[1.0, 2.0, 3.0]],
             history_liked_at_times=[_liked_at(1)],
@@ -801,7 +839,15 @@ def test_get_entry_or_404_returns_500_when_registry_init_failed(app_request, mon
 def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request, monkeypatch):
     captured = {}
 
-    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None, prior_cumulative_likes=None):
+    def fake_pad(
+        *,
+        history_embeddings,
+        max_history_len,
+        embed_dim,
+        author_indices,
+        time_deltas_hours=None,
+        prior_cumulative_likes=None,
+    ):
         captured["pad_args"] = {
             "history_embeddings": history_embeddings,
             "max_history_len": max_history_len,
@@ -852,7 +898,9 @@ def test_predict_with_entry_user_tower_uses_padded_history_and_mask(app_request,
     assert out.tolist() == [[42.0]]
 
 
-def test_predict_with_entry_user_tower_uses_real_padding_for_author_indices(app_request, monkeypatch):
+def test_predict_with_entry_user_tower_uses_real_padding_for_author_indices(
+    app_request, monkeypatch
+):
     captured = {}
 
     def user_model(history_embeddings, history_mask, author_indices):
@@ -891,7 +939,9 @@ def test_predict_with_entry_user_tower_uses_real_padding_for_author_indices(app_
     assert out.tolist() == [[42.0]]
 
 
-def test_predict_with_entry_user_tower_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
+def test_predict_with_entry_user_tower_defaults_missing_author_dids_to_unknown(
+    app_request, monkeypatch
+):
     captured = {}
 
     def user_model(history_embeddings, history_mask, author_indices):
@@ -925,16 +975,18 @@ def test_predict_with_entry_user_tower_defaults_missing_author_dids_to_unknown(a
         ]
     ]
     assert captured["history_mask"] == [[True, True, False, False, False, False, False, False]]
-    assert captured["author_indices"] == [[
-        app_request.AUTHOR_UNK_IDX,
-        app_request.AUTHOR_UNK_IDX,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]]
+    assert captured["author_indices"] == [
+        [
+            app_request.AUTHOR_UNK_IDX,
+            app_request.AUTHOR_UNK_IDX,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+    ]
     assert out.tolist() == [[42.0]]
 
 
@@ -952,7 +1004,9 @@ def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request, mo
     entry.module = post_model
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
+    req = app_request.PostTowerPredictRequest(
+        post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1"
+    )
     out = app_request._predict_with_entry(entry, req)
 
     assert captured["post_embeddings"] == [[1.0, 2.0, 3.0]]
@@ -960,7 +1014,9 @@ def test_predict_with_entry_post_tower_coerces_unbatched_vectors(app_request, mo
     assert out.tolist() == [[2.0]]
 
 
-def test_predict_with_entry_post_tower_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
+def test_predict_with_entry_post_tower_defaults_missing_author_dids_to_unknown(
+    app_request, monkeypatch
+):
     captured = {}
 
     def post_model(post_embeddings, author_indices):
@@ -1029,11 +1085,21 @@ def test_normalize_returns_neutral_scores_when_no_finite_bounds_exist(app_reques
     assert scaled.tolist() == [0.5, 0.5]
 
 
-def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_inputs(app_request, monkeypatch):
+def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_inputs(
+    app_request, monkeypatch
+):
     captured = {}
     _freeze_app_now(app_request, monkeypatch)
 
-    def fake_pad(*, history_embeddings, max_history_len, embed_dim, author_indices, time_deltas_hours=None, prior_cumulative_likes=None):
+    def fake_pad(
+        *,
+        history_embeddings,
+        max_history_len,
+        embed_dim,
+        author_indices,
+        time_deltas_hours=None,
+        prior_cumulative_likes=None,
+    ):
         captured["pad_args"] = {
             "history_embeddings": history_embeddings,
             "max_history_len": max_history_len,
@@ -1075,7 +1141,9 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
             return app_request.torch.Tensor([[0.75, 0.5]])
 
     monkeypatch.setattr(app_request, "get_padded_embedding_history_and_mask_batched", fake_pad)
-    _set_author_idx_map(app_request, monkeypatch, {"history-author": 12, "candidate-author": 13}, name="ranker")
+    _set_author_idx_map(
+        app_request, monkeypatch, {"history-author": 12, "candidate-author": 13}, name="ranker"
+    )
 
     entry = app_request.LoadedModel(model_type="ranker")
     entry.module = RankerModel()
@@ -1102,7 +1170,10 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
     assert captured["model_inputs"]["history_embeddings"] == [[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]
     assert captured["model_inputs"]["history_mask"] == [[True, False]]
     assert captured["model_inputs"]["history_time_deltas_hours"] == [[2.0, 0.0]]
-    assert captured["model_inputs"]["candidate_post_embeddings"] == [[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]]
+    assert captured["model_inputs"]["candidate_post_embeddings"] == [
+        [3.0, 2.0, 1.0],
+        [4.0, 5.0, 6.0],
+    ]
     assert captured["model_inputs"]["history_author_indices"] == [[12, 0]]
     assert captured["model_inputs"]["candidate_author_indices"] == [13, app_request.AUTHOR_UNK_IDX]
     assert captured["model_inputs"]["history_prior_cumulative_likes"] == [[10, 0]]
@@ -1110,7 +1181,9 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
     assert out.tolist() == [1.0, 0.0]
 
 
-def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
+def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(
+    app_request, monkeypatch
+):
     captured = {}
     _freeze_app_now(app_request, monkeypatch)
     monkeypatch.setattr(app_request, "_author_idx_maps", {})
@@ -1160,7 +1233,9 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
     assert out.tolist() == [0.5]
 
 
-def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candidates(app_request, monkeypatch):
+def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candidates(
+    app_request, monkeypatch
+):
     captured = {}
     _freeze_app_now(app_request, monkeypatch)
     monkeypatch.setattr(app_request, "_author_idx_maps", {})
@@ -1204,15 +1279,22 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
     assert captured["history_mask"] == [[False, False, False]]
     assert captured["history_time_deltas_hours"] == [[0.0, 0.0, 0.0]]
     assert captured["candidate_post_embeddings"] == [[3.0, 2.0, 1.0], [4.0, 5.0, 6.0]]
-    assert captured["history_author_indices"] == [[app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX]]
-    assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX, app_request.AUTHOR_UNK_IDX]
+    assert captured["history_author_indices"] == [
+        [app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX, app_request.AUTHOR_PAD_IDX]
+    ]
+    assert captured["candidate_author_indices"] == [
+        app_request.AUTHOR_UNK_IDX,
+        app_request.AUTHOR_UNK_IDX,
+    ]
     assert captured["history_prior_cumulative_likes"] == [[0, 0, 0]]
     assert captured["candidate_prior_cumulative_likes"] == [0, 0]
     assert out.tolist() == [0.0, 1.0]
 
 
 def test_ranker_request_rejects_liked_at_length_mismatch(app_request):
-    with pytest.raises(ValueError, match="History length \\(2\\) must match history liked at times length \\(1\\)"):
+    with pytest.raises(
+        ValueError, match="History length \\(2\\) must match history liked at times length \\(1\\)"
+    ):
         app_request.RankerPredictRequest(
             history_embeddings=[[9.0, 8.0, 7.0], [6.0, 5.0, 4.0]],
             history_liked_at_times=[_liked_at(1)],
@@ -1225,7 +1307,9 @@ def test_predict_with_entry_rejects_request_type_mismatch(app_request):
     entry.module = Mock()
     entry.device = app_request.torch.device("cpu")
 
-    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
+    req = app_request.PostTowerPredictRequest(
+        post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1"
+    )
 
     with pytest.raises(app_request.HTTPException) as exc_info:
         app_request._predict_with_entry(entry, req)
@@ -1240,7 +1324,9 @@ def test_predict_with_entry_rejects_ranker_request_type_mismatch(app_request):
     entry.device = app_request.torch.device("cpu")
     entry.max_history_len = 6
 
-    req = app_request.PostTowerPredictRequest(post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1")
+    req = app_request.PostTowerPredictRequest(
+        post_embeddings=[1.0, 2.0, 3.0], target_author_dids="author-1"
+    )
 
     with pytest.raises(app_request.HTTPException) as exc_info:
         app_request._predict_with_entry(entry, req)
@@ -1281,6 +1367,7 @@ SAMPLE_RANKER_MANIFEST = {
 
 def _write_manifest(tmp_path, manifest=None) -> str:
     import json
+
     path = tmp_path / "two_tower_serving_manifest.json"
     path.write_text(json.dumps(manifest or SAMPLE_MANIFEST))
     return str(path)
@@ -1288,6 +1375,7 @@ def _write_manifest(tmp_path, manifest=None) -> str:
 
 def _write_ranker_manifest(tmp_path, manifest=None) -> str:
     import json
+
     path = tmp_path / "ranker_serving_manifest.json"
     path.write_text(json.dumps(manifest or SAMPLE_RANKER_MANIFEST))
     return str(path)
@@ -1447,7 +1535,9 @@ def test_load_entry_rejects_ranker_without_matrix_scorer(monkeypatch):
 
 
 def test_load_entry_rejects_ranker_with_non_callable_matrix_scorer(monkeypatch):
-    app = _load_app_module("inference_service_ranker_non_callable_matrix_load_tests", model_types="ranker")
+    app = _load_app_module(
+        "inference_service_ranker_non_callable_matrix_load_tests", model_types="ranker"
+    )
 
     class BrokenMatrixRanker:
         score_candidate_matrix = None
@@ -1465,6 +1555,7 @@ def test_load_entry_rejects_ranker_with_non_callable_matrix_scorer(monkeypatch):
 
 def test_init_registry_fails_on_missing_manifest_keys(tmp_path):
     import json
+
     bad_manifest = {"post_tower_clearml_model_id": "abc"}  # missing post_tower_uri etc.
     path = tmp_path / "bad_manifest.json"
     path.write_text(json.dumps(bad_manifest))
@@ -1493,9 +1584,9 @@ def test_ready_response_includes_model_uuid(monkeypatch):
     monkeypatch.setattr(app, "_author_idx_maps_init_error", None)
 
     response = app.ready()
-    models_in_response = response.body if hasattr(response, "body") else None
     # Parse JSON body from JSONResponse
     import json
+
     body = json.loads(response.body)
     assert body["models"][0]["model_uuid"] == "post-model-abc123"
     assert body["author_idx_maps"]["two-tower"]["ready"] is True
@@ -1523,6 +1614,7 @@ def test_ready_response_reports_ranker_author_idx_map(monkeypatch):
     response = app.ready()
 
     import json
+
     body = json.loads(response.body)
     assert body["ready"] is True
     assert body["author_idx_maps"]["ranker"]["ready"] is True
