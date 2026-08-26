@@ -186,6 +186,24 @@ validate_config() {
         exit 1
     fi
 
+    if [ -z "$GE_INFERENCE_MIN_INSTANCES" ] || ! [[ "$GE_INFERENCE_MIN_INSTANCES" =~ ^(0|[1-9][0-9]*)$ ]]; then
+        log_error "GE_INFERENCE_MIN_INSTANCES must be a non-negative integer."
+        log_error "Example: GE_INFERENCE_MIN_INSTANCES=2 ./deploy.sh"
+        exit 1
+    fi
+
+    if [ -z "$GE_INFERENCE_MAX_INSTANCES" ] || ! [[ "$GE_INFERENCE_MAX_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "GE_INFERENCE_MAX_INSTANCES must be a positive integer."
+        log_error "Example: GE_INFERENCE_MAX_INSTANCES=8 ./deploy.sh"
+        exit 1
+    fi
+
+    if (( GE_INFERENCE_MIN_INSTANCES > GE_INFERENCE_MAX_INSTANCES )); then
+        log_error "GE_INFERENCE_MIN_INSTANCES must not exceed GE_INFERENCE_MAX_INSTANCES."
+        log_error "Received min=$GE_INFERENCE_MIN_INSTANCES max=$GE_INFERENCE_MAX_INSTANCES."
+        exit 1
+    fi
+
     if [ -z "$GE_INFERENCE_CONCURRENCY" ] || ! [[ "$GE_INFERENCE_CONCURRENCY" =~ ^([1-9][0-9]{0,2}|1000)$ ]]; then
         log_error "GE_INFERENCE_CONCURRENCY must be an integer between 1 and 1000."
         log_error "Example: GE_INFERENCE_CONCURRENCY=2 ./deploy.sh"
