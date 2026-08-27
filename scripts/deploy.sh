@@ -15,8 +15,11 @@ GE_GCP_REGION="${GE_GCP_REGION:-us-east1}"
 GE_ENVIRONMENT="${GE_ENVIRONMENT:-stage}"
 GE_ENABLE_INFERENCE_DOMAIN_MAPPING="${GE_ENABLE_INFERENCE_DOMAIN_MAPPING:-true}"
 GE_INFERENCE_DOMAIN="${GE_INFERENCE_DOMAIN:-}"
-GE_INFERENCE_MIN_INSTANCES="${GE_INFERENCE_MIN_INSTANCES:-1}"
-GE_INFERENCE_MAX_INSTANCES="${GE_INFERENCE_MAX_INSTANCES:-1}"
+GE_INFERENCE_MIN_INSTANCES="${GE_INFERENCE_MIN_INSTANCES:-2}"
+GE_INFERENCE_MAX_INSTANCES="${GE_INFERENCE_MAX_INSTANCES:-8}"
+# Selected from the 2026-08-26 stage ranker benchmark on 2 vCPU;
+# concurrency 2 was the best measured throughput/latency tradeoff.
+GE_INFERENCE_CONCURRENCY="${GE_INFERENCE_CONCURRENCY:-2}"
 
 # Multi-model config — required, no defaults
 GE_INFERENCE_MODELS="${GE_INFERENCE_MODELS:-}"
@@ -211,6 +214,30 @@ validate_config() {
         exit 1
     fi
 
+    if [ -z "$GE_INFERENCE_MIN_INSTANCES" ] || ! [[ "$GE_INFERENCE_MIN_INSTANCES" =~ ^(0|[1-9][0-9]*)$ ]]; then
+        log_error "GE_INFERENCE_MIN_INSTANCES must be a non-negative integer."
+        log_error "Example: GE_INFERENCE_MIN_INSTANCES=2 ./deploy.sh"
+        exit 1
+    fi
+
+    if [ -z "$GE_INFERENCE_MAX_INSTANCES" ] || ! [[ "$GE_INFERENCE_MAX_INSTANCES" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "GE_INFERENCE_MAX_INSTANCES must be a positive integer."
+        log_error "Example: GE_INFERENCE_MAX_INSTANCES=8 ./deploy.sh"
+        exit 1
+    fi
+
+    if (( GE_INFERENCE_MIN_INSTANCES > GE_INFERENCE_MAX_INSTANCES )); then
+        log_error "GE_INFERENCE_MIN_INSTANCES must not exceed GE_INFERENCE_MAX_INSTANCES."
+        log_error "Received min=$GE_INFERENCE_MIN_INSTANCES max=$GE_INFERENCE_MAX_INSTANCES."
+        exit 1
+    fi
+
+    if [ -z "$GE_INFERENCE_CONCURRENCY" ] || ! [[ "$GE_INFERENCE_CONCURRENCY" =~ ^([1-9][0-9]{0,2}|1000)$ ]]; then
+        log_error "GE_INFERENCE_CONCURRENCY must be an integer between 1 and 1000."
+        log_error "Example: GE_INFERENCE_CONCURRENCY=2 ./deploy.sh"
+        exit 1
+    fi
+
     if [ "$GE_ENABLE_INFERENCE_DOMAIN_MAPPING" = "true" ]; then
         log_info "Inference domain mapping enabled for: $(resolve_inference_domain)"
     else
@@ -350,6 +377,7 @@ EOF
     deploy_cmd="$deploy_cmd --timeout=120"
     deploy_cmd="$deploy_cmd --min-instances=$GE_INFERENCE_MIN_INSTANCES"
     deploy_cmd="$deploy_cmd --max-instances=$GE_INFERENCE_MAX_INSTANCES"
+    deploy_cmd="$deploy_cmd --concurrency=$GE_INFERENCE_CONCURRENCY"
 
     # Tag the service/revision with the git sha so past deployments are
     # identifiable when picking a rollback target (see scripts/rollback.sh).
@@ -405,6 +433,9 @@ main() {
     log_info "Embed dimension: $GE_INFERENCE_CONTENT_EMBED_DIM"
     log_info "Max batch:       $GE_INFERENCE_MAX_BATCH"
     log_info "Model cache dir: $GE_INFERENCE_MODEL_CACHE_DIR"
+    log_info "Min instances:   $GE_INFERENCE_MIN_INSTANCES"
+    log_info "Max instances:   $GE_INFERENCE_MAX_INSTANCES"
+    log_info "Concurrency:     $GE_INFERENCE_CONCURRENCY"
 
     require_clean_worktree
     validate_config
@@ -487,6 +518,10 @@ while [[ $# -gt 0 ]]; do
             GE_INFERENCE_MAX_INSTANCES="$2"
             shift 2
             ;;
+        --concurrency)
+            GE_INFERENCE_CONCURRENCY="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -507,8 +542,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --model-cache-dir PATH          Local cache dir for downloaded gs:// artifacts"
             echo "  --inference-domain DOMAIN       Custom mapped domain for inference service"
             echo "  --disable-domain-mapping        Skip domain mapping reconciliation"
-            echo "  --min-instances N               Minimum Cloud Run instances (default: 1)"
-            echo "  --max-instances N               Maximum Cloud Run instances (default: 1)"
+            echo "  --min-instances N               Minimum Cloud Run instances (default: 2)"
+            echo "  --max-instances N               Maximum Cloud Run instances (default: 8)"
+            echo "  --concurrency N                 Max concurrent requests per instance (default: 2)"
             echo "  --help                          Show this help message"
             echo ""
             echo "Environment variables:"
@@ -527,8 +563,9 @@ while [[ $# -gt 0 ]]; do
             echo "  GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI    GCS URI or local path for the two tower author idx parquet map"
             echo "  GE_ENABLE_INFERENCE_DOMAIN_MAPPING       true/false toggle (default: true)"
             echo "  GE_INFERENCE_DOMAIN                      Custom mapped domain"
-            echo "  GE_INFERENCE_MIN_INSTANCES               Minimum Cloud Run instances (default: 1)"
-            echo "  GE_INFERENCE_MAX_INSTANCES               Maximum Cloud Run instances (default: 1)"
+            echo "  GE_INFERENCE_MIN_INSTANCES               Minimum Cloud Run instances (default: 2)"
+            echo "  GE_INFERENCE_MAX_INSTANCES               Maximum Cloud Run instances (default: 8)"
+            echo "  GE_INFERENCE_CONCURRENCY                 Max concurrent requests per instance (default: 2)"
             echo ""
             echo "Examples:"
             echo "  $0 --environment stage \\"
