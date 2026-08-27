@@ -23,6 +23,7 @@ First, please join our discord and introduce yourself: https://discord.com/invit
 ## Repository Layout
 
 - `app.py`: FastAPI app, model-loading logic, request validation, and inference endpoints
+- `history_features.py`: serving-owned user-history normalization and padding
 - `scripts/gcp_setup.sh`: one-time or occasional GCP setup for a target environment
 - `scripts/deploy.sh`: deploys the service to Cloud Run from source
 - `Dockerfile`: CPU-serving image used by Cloud Run source deploys
@@ -33,7 +34,6 @@ First, please join our discord and introduce yourself: https://discord.com/invit
 
 - Python 3.11+
 - `pipenv`
-- Access to the `engagement-prediction` repository
 
 ## Installation
 
@@ -48,41 +48,6 @@ First, please join our discord and introduce yourself: https://discord.com/invit
    ```bash
    pipenv install --dev
    ```
-
-## Shared ML Code (`shared` package)
-
-This service depends on the `shared` package from the
-[engagement-prediction](https://github.com/greenearth-social/engagement-prediction)
-repo. That package contains preprocessing and input-shaping helpers that are
-shared between training and serving so the inference contract stays aligned with
-the code that produced the model.
-
-The dependency is declared in `Pipfile` as a git dependency, and the exact
-resolved version is pinned in `Pipfile.lock`.
-
-### Updating to the latest shared code
-
-```bash
-pipenv lock
-pipenv install
-```
-
-This re-resolves the git dependency and updates the pinned commit in
-`Pipfile.lock`. Commit the updated lockfile so deploys and teammates use the
-same shared-code version.
-
-### Pinning a specific commit or branch
-
-Edit the `ref` in `Pipfile`, then re-lock:
-
-```toml
-shared = {git = "https://github.com/greenearth-social/engagement-prediction.git", ref = "<commit-sha-or-branch>"}
-```
-
-```bash
-pipenv lock
-pipenv install
-```
 
 ## Running Locally
 

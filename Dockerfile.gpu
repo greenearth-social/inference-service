@@ -30,7 +30,7 @@ COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements.txt
 
-COPY app.py .
+COPY app.py history_features.py ./
 
 EXPOSE 8080
 USER appuser
