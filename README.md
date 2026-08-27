@@ -109,7 +109,8 @@ The API will be available at `http://localhost:8080`.
 
 ## API Endpoints
 
-- `GET /health`: unauthenticated process health check
+- `GET /health`: unauthenticated process health check; also reports the deployed
+  git sha (`{"ok":true,"git_sha":"e9f07f5"}`), used to confirm rollbacks
 - `GET /ready`: authenticated readiness check including model load status
 - `GET /models`: authenticated list of registered models and load state
 - `POST /models/{model_name}/predict`: authenticated inference endpoint
@@ -339,10 +340,71 @@ still controls which models are actually loaded.
 
 During deploy, the script will:
 
+- refuse to deploy from a dirty working tree, and resolve the short git sha
 - validate the required model configuration
 - generate `requirements.txt` from `Pipfile`
 - verify whether the shared VPC connector exists
 - deploy the service to Cloud Run with the right env vars and secret bindings
+- point traffic at the newly created revision
+
+### Deployments must be from a clean tree (git sha traceability)
+
+So we always know exactly what code is live, `deploy.sh` **refuses to deploy
+with uncommitted changes**. Deploying an unpushed branch is fine — only a dirty
+working tree is rejected. Commit or stash first, then deploy.
+
+Each deploy stamps its short git sha in two places:
+
+- **Cloud Run env var `GE_GIT_SHA`** — the running app reports it at
+  `GET /health` (`{"ok":true,"git_sha":"e9f07f5"}`). Outside a stamped
+  deployment (e.g. locally) `git_sha` is `null`.
+- **Cloud Run label `git-sha=<sha>`** — tags the service/revision so past
+  deployments are identifiable when picking a rollback target
+  (`./scripts/rollback.sh --list`).
+
+### Rolling back a deployment
+
+`deploy.sh` builds from source, so the repo never names an image tag — the
+durable record of a past deployment is its **Cloud Run revision**, which pins
+the built image digest along with the env configuration it ran with. Rolling
+back re-points traffic at an older revision, with no rebuild.
+
+```bash
+./scripts/rollback.sh --environment prod --list   # see candidates + git shas
+./scripts/rollback.sh --environment prod          # back to the previous deploy
+./scripts/rollback.sh --environment prod --to 7176a35   # or a specific target
+```
+
+`--to` accepts a revision name or a git sha. With no `--to`, the target is the
+newest Ready revision older than the one serving, with a different git sha. The
+script prompts for confirmation (`--yes` skips it, `--dry-run` shows the exact
+`gcloud` command without running it), then polls `GET /health` until the service
+reports the target's sha.
+
+**Model manifests travel with the revision.** `GE_INFERENCE_MODELS` and the
+`*_MANIFEST_URI` values are part of each revision's env configuration, so a
+rollback restores the code together with the model artifacts it was deployed
+against — rolling code back without its manifests would pair old code with newer
+model files. The script prints both revisions' model configuration before asking
+for confirmation, because the API is the caller here: if the target revision
+serves a different set of models, check that the deployed API still expects them.
+
+Domain mappings (`inference[-stage].greenearth.social`) target the service, not a
+revision, so they follow the rollback with no extra work. `/health` answers as
+soon as the process is up; model loading is separate, so check `/ready` (needs
+`X-API-Key`) if you need to confirm the models finished loading.
+
+Revisions deployed before git-sha stamping show as `(unstamped)` in `--list`.
+They are still valid `--to` targets by revision name; they just cannot
+self-report a sha, so `/health` verification is skipped for them.
+
+**Getting back out:** a rollback pins traffic to a named revision, taking
+`LATEST` out of the traffic split. `deploy.sh` resets traffic to `LATEST` after
+every successful deploy, so deploying the fix is all it takes. Because the reset
+runs only on success, a failed build leaves traffic on the rolled-back revision.
+
+Rollbacks are manual by design. Cloud Run's own health-check behavior is
+untouched — a revision that never becomes Ready never receives traffic.
 
 ## API Security
 

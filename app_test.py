@@ -1552,3 +1552,19 @@ def test_predict_response_includes_model_uuid(app_request, monkeypatch):
 
     assert result["model_uuid"] == "post-model-abc123"
     assert result["model_type"] == "post-tower"
+
+
+def test_health_reports_deployed_git_sha(app_request, monkeypatch):
+    monkeypatch.setenv("GE_GIT_SHA", "e9f07f5")
+
+    result = app_request.health()
+
+    assert result == {"ok": True, "git_sha": "e9f07f5"}
+
+
+def test_health_reports_no_git_sha_when_unstamped(app_request, monkeypatch):
+    monkeypatch.delenv("GE_GIT_SHA", raising=False)
+
+    result = app_request.health()
+
+    assert result == {"ok": True, "git_sha": None}

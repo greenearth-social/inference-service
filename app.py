@@ -1136,8 +1136,11 @@ def _get_author_idx_maps_summary() -> dict[str, dict[str, Any]]:
 # -------------------------
 @app.get("/health")
 def health() -> dict:
-    # Process is up.
-    return {"ok": True}
+    # Process is up. git_sha is the short sha deploy.sh stamped onto the Cloud
+    # Run revision, so this endpoint reports exactly which code is serving —
+    # used to confirm a rollback landed (scripts/rollback.sh). None when running
+    # outside a stamped deployment, e.g. locally.
+    return {"ok": True, "git_sha": os.environ.get("GE_GIT_SHA") or None}
 
 
 @app.get("/ready", dependencies=[Security(_require_api_key)])
