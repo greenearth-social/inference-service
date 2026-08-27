@@ -23,10 +23,12 @@ from pydantic import (
     AwareDatetime
 )
 
-from shared.input_data_helpers import (
-    get_padded_embedding_history_and_mask_batched,
-    classify_history_embeddings_shape,
+from history_features import (
+    AUTHOR_PAD_IDX,
+    AUTHOR_UNK_IDX,
     HistoryEmbeddingsShape,
+    classify_history_embeddings_shape,
+    get_padded_embedding_history_and_mask_batched,
 )
 
 
@@ -66,9 +68,6 @@ if GE_INFERENCE_MAX_BATCH == 0:
     GE_INFERENCE_MAX_BATCH = None
 
 DTYPE_FLOAT = torch.float32
-
-AUTHOR_PAD_IDX = 0
-AUTHOR_UNK_IDX = 1
 
 # -------------------------
 # State

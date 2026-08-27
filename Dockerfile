@@ -42,7 +42,7 @@ RUN pip install --no-cache-dir \
     --index-url "https://download.pytorch.org/whl/cpu" \
     "torch==${TORCH_VERSION}+cpu"
 
-COPY app.py .
+COPY app.py history_features.py ./
 
 EXPOSE 8080
 USER appuser
