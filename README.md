@@ -230,6 +230,8 @@ The service supports stable Cloud Run domain mappings:
 ### Prerequisites for Deployment
 
 - [gcloud CLI](https://cloud.google.com/sdk/docs/install) installed and authenticated
+- the gcloud beta component for domain mappings: `gcloud components install beta`
+  (not needed when deploying with `--disable-domain-mapping`)
 - appropriate GCP permissions for Cloud Run, Cloud Build, Secret Manager, and Storage
 
 ### First-Time Setup

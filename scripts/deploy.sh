@@ -93,6 +93,25 @@ models_include() {
     esac
 }
 
+require_domain_mapping_component() {
+    local beta_version
+
+    # Inspect local versions without invoking `gcloud beta`: that command can
+    # prompt to install the component, hidden by reconciliation's redirections.
+    if ! beta_version=$(CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true \
+        gcloud version --format="value(beta)"); then
+        log_error "Could not check installed gcloud components. Verify your gcloud installation."
+        exit 1
+    fi
+
+    if [ -z "$beta_version" ]; then
+        log_error "Domain mapping requires the gcloud beta component."
+        log_error "Install it before deploying: gcloud components install beta"
+        log_error "Or skip domain mapping with --disable-domain-mapping."
+        exit 1
+    fi
+}
+
 get_domain_mapping_condition_status() {
     local domain="$1"
     local condition_type="$2"
@@ -240,6 +259,7 @@ validate_config() {
 
     if [ "$GE_ENABLE_INFERENCE_DOMAIN_MAPPING" = "true" ]; then
         log_info "Inference domain mapping enabled for: $(resolve_inference_domain)"
+        require_domain_mapping_component
     else
         log_info "Inference domain mapping disabled"
     fi
