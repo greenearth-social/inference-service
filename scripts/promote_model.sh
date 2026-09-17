@@ -43,6 +43,12 @@ case "$MODEL_TYPE" in
         ;;
 esac
 
+GSUTIL=(gsutil -m)
+if [ "$(uname -s)" = "Darwin" ]; then
+    # Avoid gsutil multiprocessing hangs on macOS; keep threaded transfers.
+    GSUTIL+=(-o "GSUtil:parallel_process_count=1")
+fi
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -50,7 +56,7 @@ SOURCE_URI="gs://$SOURCE_BUCKET/Engagement Prediction/$FOLDER"
 TARGET_URI="gs://$TARGET_BUCKET/Engagement Prediction/$FOLDER"
 MANIFEST_PATH="$TMP_DIR/artifacts/${MODEL_TYPE}_serving_manifest/${MODEL_TYPE}_serving_manifest.json"
 
-gsutil -m rsync -r "$SOURCE_URI" "$TMP_DIR"
+"${GSUTIL[@]}" rsync -r "$SOURCE_URI" "$TMP_DIR"
 
 pipenv run python -c '
 import json
@@ -97,4 +103,4 @@ with open(manifest_path, "w", encoding="utf-8") as manifest_file:
     manifest_file.write("\n")
 ' "$MANIFEST_PATH" "$SOURCE_BUCKET" "$TARGET_BUCKET" "$TARGET_URI" "$MODEL_TYPE"
 
-gsutil -m rsync -r "$TMP_DIR" "$TARGET_URI"
+"${GSUTIL[@]}" rsync -r "$TMP_DIR" "$TARGET_URI"
