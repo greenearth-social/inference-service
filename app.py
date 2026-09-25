@@ -150,6 +150,8 @@ class LoadedModel:
     resolved_model_path: str | None = None
     resolved_model_id: str | None = None
     model_uuid: str | None = None
+    # Pairing belongs to the loaded user tower, including user-only deployments.
+    paired_post_model_uuid: str | None = None
     max_history_len: int | None = None
 
     load_error: str | None = None
@@ -742,6 +744,7 @@ def _init_registry() -> None:
                     model_type=model_type,
                     configured_model_uri=uri,
                     model_uuid=model_uuid,
+                    paired_post_model_uuid=post_tower_uuid if model_type == "user-tower" else None,
                 )
 
             _models = models
@@ -1223,4 +1226,7 @@ def predict_model(model_name: str, req: PredictRequest = Body(...)) -> dict:
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Inference failed: {e}")
-    return {"outputs": _to_python(y), "model_type": entry.model_type, "model_uuid": entry.model_uuid}
+    response = {"outputs": _to_python(y), "model_type": entry.model_type, "model_uuid": entry.model_uuid}
+    if entry.model_type == "user-tower":
+        response["paired_post_model_uuid"] = entry.paired_post_model_uuid
+    return response

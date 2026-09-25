@@ -1316,6 +1316,57 @@ def test_init_registry_sets_model_uuid_from_manifest(tmp_path):
     assert app._models_init_error is None
     assert app._models["post-tower"].model_uuid == "post-model-abc123"
     assert app._models["user-tower"].model_uuid == "user-model-def456"
+    assert app._models["user-tower"].paired_post_model_uuid == "post-model-abc123"
+
+
+def test_user_only_prediction_retains_loaded_manifest_pair_across_revisions(tmp_path, monkeypatch):
+    revisions = []
+    for revision, post_uuid in [("old", "post-old"), ("new", "post-new")]:
+        manifest = {
+            **SAMPLE_MANIFEST,
+            "post_tower_clearml_model_id": post_uuid,
+        }
+        app = _load_app_module(f"inference_service_pair_{revision}_tests", model_types="user-tower")
+        monkeypatch.setenv("GE_INFERENCE_TWO_TOWER_MANIFEST_URI", _write_manifest(tmp_path, manifest))
+        app._init_registry()
+
+        assert app._models_init_error is None
+        assert set(app._models) == {"user-tower"}
+        # The registry snapshot must survive a new manifest at the same URI. No
+        # post tower loading or readiness lookup is needed to identify the pair.
+        monkeypatch.setattr(app, "_predict_with_entry", lambda entry, req: [[1.0, 2.0]])
+        revisions.append((app, post_uuid))
+
+    for app, post_uuid in revisions:
+        result = app.predict_model(
+            "user-tower",
+            req=app.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0, 3.0]]),
+        )
+        assert result == {
+            "outputs": [[1.0, 2.0]],
+            "model_type": "user-tower",
+            "model_uuid": "user-model-def456",
+            "paired_post_model_uuid": post_uuid,
+        }
+
+
+@pytest.mark.parametrize("dimension", [None, True, 0, -1, 1.5, "128"])
+def test_user_prediction_ignores_optional_manifest_output_dimension(tmp_path, monkeypatch, dimension):
+    manifest = {key: value for key, value in SAMPLE_MANIFEST.items() if key != "output_embedding_dim"}
+    if dimension is not None:
+        manifest["output_embedding_dim"] = dimension
+    app = _load_app_module("inference_service_pair_optional_dimension_tests", model_types="user-tower")
+    monkeypatch.setenv("GE_INFERENCE_TWO_TOWER_MANIFEST_URI", _write_manifest(tmp_path, manifest))
+    app._init_registry()
+    assert app._models_init_error is None
+    monkeypatch.setattr(app, "_predict_with_entry", lambda entry, req: [[1.0]])
+
+    result = app.predict_model(
+        "user-tower", req=app.UserTowerPredictRequest(history_embeddings=[[1.0, 2.0, 3.0]])
+    )
+
+    assert result["paired_post_model_uuid"] == "post-model-abc123"
+    assert "output_embedding_dim" not in result
 
 
 def test_init_registry_sets_configured_model_uri_from_manifest(tmp_path):
@@ -1552,6 +1603,8 @@ def test_predict_response_includes_model_uuid(app_request, monkeypatch):
 
     assert result["model_uuid"] == "post-model-abc123"
     assert result["model_type"] == "post-tower"
+    assert "paired_post_model_uuid" not in result
+    assert "output_embedding_dim" not in result
 
 
 def test_health_reports_deployed_git_sha(app_request, monkeypatch):

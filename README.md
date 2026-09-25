@@ -118,6 +118,33 @@ The API will be available at `http://localhost:8080`.
 Authentication for protected endpoints uses the `X-API-Key` header and is
 validated against `GE_INFERENCE_API_KEY`.
 
+### User-tower prediction metadata
+
+Successful user-tower predictions retain `outputs`, `model_type`, and
+`model_uuid`, and also return `paired_post_model_uuid`. Both model IDs come
+from the same serving manifest captured when that process initializes its
+model registry. Pairing is available with `GE_INFERENCE_MODELS=user-tower`;
+the post tower does not need to be loaded. Consumers derive the embedding
+dimension directly from the returned vector.
+
+```json
+{
+  "outputs": [[0.1, 0.2, 0.3]],
+  "model_type": "user-tower",
+  "model_uuid": "user-model-id",
+  "paired_post_model_uuid": "post-model-id"
+}
+```
+
+The API's `/embeddings/user` endpoint and offline average-embedding producer
+use these fields to pin the Elasticsearch post-model filter to the tower
+paired with the prediction. Deploy this inference response addition before
+using the new API endpoint. An older inference revision without pairing
+metadata cannot safely produce a publishable average. During a rolling
+deployment each prediction describes its own process's loaded pair; a
+producer run rejects mixed pairs instead of consulting `/ready` or guessing.
+Post-tower and ranker prediction response shapes are unchanged.
+
 ### Example request shapes
 
 `user-tower` expects `history_embeddings` in either single-user or batched form:
