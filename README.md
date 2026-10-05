@@ -32,7 +32,7 @@ First, please join our discord and introduce yourself: https://discord.com/invit
 
 ## Prerequisites
 
-- Python 3.11+
+- Python 3.13
 - `pipenv`
 
 ## Installation
