@@ -369,10 +369,23 @@ During deploy, the script will:
 
 - refuse to deploy from a dirty working tree, and resolve the short git sha
 - validate the required model configuration
+- read manifests and check selected model files and required author maps using
+  the deploying account, then check the runtime account's `storage.objects.get`
+  permission for each file using Policy Troubleshooter
 - generate `requirements.txt` from `Pipfile`
 - verify whether the shared VPC connector exists
 - deploy the service to Cloud Run with the right env vars and secret bindings
 - point traffic at the newly created revision
+
+The pre-deploy file check uses Bash, `jq`, and `gcloud` with `gs://` URIs. It
+requires the deploying account to read the files and view the relevant IAM
+policies, and the Policy Troubleshooter API (`policytroubleshooter.googleapis.com`)
+must be enabled. It does not use service account impersonation. Any failed read,
+Troubleshooter error, or result other than `CAN_ACCESS` stops the deployment
+before the build. Object paths are included when evaluating conditional grants.
+
+This checks file existence and IAM access; it does not load the models. Policy
+Troubleshooter does not evaluate Cloud Storage ACL grants or VPC Service Controls.
 
 ### Deployments must be from a clean tree (git sha traceability)
 
