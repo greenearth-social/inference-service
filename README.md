@@ -369,10 +369,17 @@ During deploy, the script will:
 
 - refuse to deploy from a dirty working tree, and resolve the short git sha
 - validate the required model configuration
+- verify that the runtime service account can read the manifests, selected model
+  files, and required author maps from GCS before building or deploying
 - generate `requirements.txt` from `Pipfile`
 - verify whether the shared VPC connector exists
 - deploy the service to Cloud Run with the right env vars and secret bindings
 - point traffic at the newly created revision
+
+The file-access check requires `jq`, `gs://` URIs, and permission for the deploying
+account to impersonate `engagement-prediction-sa-<environment>@<project>.iam.gserviceaccount.com`
+(typically `roles/iam.serviceAccountTokenCreator` on that service account).
+It checks file access only; it does not load or run the models.
 
 ### Deployments must be from a clean tree (git sha traceability)
 
