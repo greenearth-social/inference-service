@@ -371,23 +371,8 @@ During deploy, the script will:
 - validate the required model configuration
 - generate `requirements.txt` from `Pipfile`
 - verify whether the shared VPC connector exists
-- deploy a new Cloud Run revision with the right env vars and secret bindings,
-  keeping existing traffic in place
-- poll that revision's authenticated `/ready` endpoint through a temporary tag
-  for up to 180 seconds
-- point traffic at that exact revision only after all configured models and
-  required author maps have loaded, then remove the temporary tag
-
-If readiness fails, the script exits nonzero and prints the last readiness
-response, including model-loading errors. Existing traffic stays on the previous
-revision(s). The temporary tag is also removed on failure so an unused revision
-does not retain minimum instances through that tag.
-
-The deploying account must be able to read the `inference-api-key-<environment>`
-secret to authenticate the readiness check. Model files are read by the running
-revision's service account. This workflow requires an existing Cloud Run service:
-`gcloud --no-traffic` rejects first-time service creation rather than bypassing
-the readiness gate.
+- deploy the service to Cloud Run with the right env vars and secret bindings
+- point traffic at the newly created revision
 
 ### Deployments must be from a clean tree (git sha traceability)
 
@@ -440,10 +425,10 @@ Revisions deployed before git-sha stamping show as `(unstamped)` in `--list`.
 They are still valid `--to` targets by revision name; they just cannot
 self-report a sha, so `/health` verification is skipped for them.
 
-**Getting back out:** a rollback pins traffic to a named revision. `deploy.sh`
-shifts traffic to the newly deployed revision after its readiness check passes,
-so deploying the fix is all it takes. A failed build or readiness check leaves
-traffic on the rolled-back revision.
+**Getting back out:** a rollback pins traffic to a named revision, taking
+`LATEST` out of the traffic split. `deploy.sh` resets traffic to `LATEST` after
+every successful deploy, so deploying the fix is all it takes. Because the reset
+runs only on success, a failed build leaves traffic on the rolled-back revision.
 
 Rollbacks are manual by design. Cloud Run's own health-check behavior is
 untouched — a revision that never becomes Ready never receives traffic.
