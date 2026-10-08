@@ -249,46 +249,6 @@ validate_config() {
     log_info "Configuration validation complete."
 }
 
-read_model_file() {
-    local uri="$1"
-    shift
-    if [[ "$uri" != gs://* ]]; then
-        log_error "Cloud Run model files must use gs:// URIs: $uri" >&2
-        return 1
-    fi
-    gcloud storage cat "$uri" "$@" \
-        --project="$GE_GCP_PROJECT_ID" \
-        --impersonate-service-account="engagement-prediction-sa-$GE_ENVIRONMENT@$GE_GCP_PROJECT_ID.iam.gserviceaccount.com"
-}
-
-verify_model_file_access() {
-    log_info "Checking model file access as the runtime service account..."
-    if ! command -v jq > /dev/null; then
-        log_error "jq is required to read the model manifests."
-        return 1
-    fi
-
-    local two_manifest ranker_manifest model_type model_uri
-    two_manifest=$(read_model_file "$GE_INFERENCE_TWO_TOWER_MANIFEST_URI")
-    for model_type in user-tower post-tower; do
-        if models_include "$model_type"; then
-            model_uri=$(jq -er --arg key "${model_type//-/_}_uri" \
-                '.[$key] // error("Missing \($key) in manifest")' <<< "$two_manifest")
-            # A one-byte read checks access without downloading a whole model.
-            read_model_file "$model_uri" --range=0-0 > /dev/null
-        fi
-    done
-    if models_include user-tower || models_include post-tower; then
-        read_model_file "$GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI" --range=0-0 > /dev/null
-    fi
-    if models_include ranker; then
-        ranker_manifest=$(read_model_file "$GE_INFERENCE_RANKER_MANIFEST_URI")
-        model_uri=$(jq -er '.ranker_uri // error("Missing ranker_uri in manifest")' <<< "$ranker_manifest")
-        read_model_file "$model_uri" --range=0-0 > /dev/null
-        read_model_file "$GE_INFERENCE_RANKER_AUTHOR_MAP_URI" --range=0-0 > /dev/null
-    fi
-}
-
 reconcile_domain_mapping() {
     if [ "$GE_ENABLE_INFERENCE_DOMAIN_MAPPING" != "true" ]; then
         return
@@ -479,7 +439,6 @@ main() {
 
     require_clean_worktree
     validate_config
-    verify_model_file_access
     generate_requirements
     verify_vpc_connector
     deploy_inference_service
@@ -572,12 +531,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --environment ENV               Environment name (default: stage)"
             echo "  --models TYPES                  Comma-separated model types to load (required)"
             echo "                                  Supported: user-tower, post-tower, ranker"
-            echo "  --two-tower-manifest-uri URI    GCS URI to two_tower_serving_manifest.json (required)"
+            echo "  --two-tower-manifest-uri URI    GCS URI or local path to two_tower_serving_manifest.json (required)"
             echo "  --content-embed-dim N           Dimension of the input content embeddings (required)"
-            echo "  --two-tower-author-map-uri URI  GCS URI for the author idx parquet map (required)"
+            echo "  --two-tower-author-map-uri URI  GCS URI or local path for the author idx parquet map (required)"
             echo "  --two-tower-max-history-len N   Maximum user history sequence length (required)"
-            echo "  --ranker-manifest-uri URI       GCS URI to ranker_serving_manifest.json (required with ranker)"
-            echo "  --ranker-author-map-uri URI     GCS URI for the ranker author idx parquet map (required with ranker)"
+            echo "  --ranker-manifest-uri URI       GCS URI or local path to ranker_serving_manifest.json (required with ranker)"
+            echo "  --ranker-author-map-uri URI     GCS URI or local path for the ranker author idx parquet map (required with ranker)"
             echo "  --ranker-max-history-len N      Maximum ranker history sequence length (required with ranker)"
             echo "  --max-batch N                   Max batch size allowed for inference"
             echo "  --model-cache-dir PATH          Local cache dir for downloaded gs:// artifacts"
@@ -601,7 +560,7 @@ while [[ $# -gt 0 ]]; do
             echo "  GE_INFERENCE_CONTENT_EMBED_DIM           Same as --content-embed-dim (required)"
             echo "  GE_INFERENCE_MAX_BATCH                   Same as --max-batch (optional; 0 = no limit)"
             echo "  GE_INFERENCE_MODEL_CACHE_DIR             Same as --model-cache-dir"
-            echo "  GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI    GCS URI for the two tower author idx parquet map"
+            echo "  GE_INFERENCE_TWO_TOWER_AUTHOR_MAP_URI    GCS URI or local path for the two tower author idx parquet map"
             echo "  GE_ENABLE_INFERENCE_DOMAIN_MAPPING       true/false toggle (default: true)"
             echo "  GE_INFERENCE_DOMAIN                      Custom mapped domain"
             echo "  GE_INFERENCE_MIN_INSTANCES               Minimum Cloud Run instances (default: 2)"
@@ -633,6 +592,4 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    main
-fi
+main
