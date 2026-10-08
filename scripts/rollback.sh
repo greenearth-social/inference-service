@@ -20,8 +20,8 @@
 # revision, so they follow the rollback with no extra work.
 #
 # After a rollback, traffic is pinned to a named revision. The next successful
-# deploy.sh run resets traffic to LATEST, so "deploy the fix" is also how you
-# leave the rolled-back state.
+# deploy.sh run promotes its new revision after checking /ready, so "deploy the
+# fix" is also how you leave the rolled-back state.
 
 set -e
 
@@ -355,7 +355,7 @@ main() {
     echo ""
     log_info "To leave the rolled-back state, deploy the fix normally:"
     echo "  ./scripts/deploy.sh --environment $GE_ENVIRONMENT ..."
-    echo "  (deploy.sh resets traffic to LATEST on success)"
+    echo "  (deploy.sh promotes the new revision after /ready passes)"
 }
 
 # Parse command line arguments

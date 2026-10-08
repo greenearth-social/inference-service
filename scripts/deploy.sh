@@ -21,6 +21,9 @@ GE_INFERENCE_MAX_INSTANCES="${GE_INFERENCE_MAX_INSTANCES:-8}"
 # concurrency 2 was the best measured throughput/latency tradeoff.
 GE_INFERENCE_CONCURRENCY="${GE_INFERENCE_CONCURRENCY:-2}"
 
+# Maximum time to wait for the new revision's models and author maps to load.
+READY_TIMEOUT_SEC=180
+
 # Multi-model config — required, no defaults
 GE_INFERENCE_MODELS="${GE_INFERENCE_MODELS:-}"
 GE_INFERENCE_TWO_TOWER_MANIFEST_URI="${GE_INFERENCE_TWO_TOWER_MANIFEST_URI:-}"
@@ -333,6 +336,7 @@ verify_vpc_connector() {
 deploy_inference_service() {
     local service_name="engagement-prediction-inference-$GE_ENVIRONMENT"
     local sa_email="engagement-prediction-sa-$GE_ENVIRONMENT@$GE_GCP_PROJECT_ID.iam.gserviceaccount.com"
+    local revision_tag="deploy-check-$(date +%s)-$RANDOM"
 
     log_info "Deploying $service_name from source..."
 
@@ -340,7 +344,9 @@ deploy_inference_service() {
     # characters (e.g. GCS paths) are passed safely to gcloud.
     local temp_var_dir
     temp_var_dir=$(mktemp -d)
-    trap "rm -rf $temp_var_dir" EXIT
+    local cleanup_command
+    printf -v cleanup_command 'cleanup_deployment %q %q %q' "$service_name" "$revision_tag" "$temp_var_dir"
+    trap "$cleanup_command" EXIT
     cat > "$temp_var_dir/env-vars.yaml" <<EOF
 GE_INFERENCE_MODELS: "$GE_INFERENCE_MODELS"
 GE_INFERENCE_TWO_TOWER_MANIFEST_URI: "$GE_INFERENCE_TWO_TOWER_MANIFEST_URI"
@@ -361,6 +367,9 @@ EOF
     deploy_cmd="$deploy_cmd --source=."
     deploy_cmd="$deploy_cmd --region=$GE_GCP_REGION"
     deploy_cmd="$deploy_cmd --service-account=$sa_email"
+    # Keep existing traffic in place while testing this revision through its
+    # own URL. A unique tag prevents another deploy from replacing that target.
+    deploy_cmd="$deploy_cmd --no-traffic --tag=$revision_tag --format=json"
 
     if [ "$VPC_CONNECTOR_EXISTS" = true ]; then
         deploy_cmd="$deploy_cmd --vpc-connector=ingex-vpc-connector-$GE_ENVIRONMENT"
@@ -384,36 +393,136 @@ EOF
     deploy_cmd="$deploy_cmd --labels=git-sha=$GIT_SHA"
 
     log_build "Executing: $deploy_cmd"
-    eval "$deploy_cmd"
+    eval "$deploy_cmd" > "$temp_var_dir/deployment.json"
 
-    log_info "✓ $service_name deployed successfully"
+    local revision_target deployed_revision revision_url
+    revision_target=$(pipenv run python - "$temp_var_dir/deployment.json" "$revision_tag" <<'PY'
+import json
+import sys
 
-    reset_traffic_to_latest "$service_name"
+with open(sys.argv[1]) as deployment_file:
+    deployment = json.load(deployment_file)
+
+for target in deployment.get("status", {}).get("traffic", []):
+    if target.get("tag") == sys.argv[2]:
+        revision = target.get("revisionName")
+        url = target.get("url")
+        if revision and url:
+            print(f"{revision}\t{url}")
+            break
+else:
+    raise SystemExit("Could not resolve the deployed revision's tagged URL; traffic has not been promoted.")
+PY
+    )
+    IFS=$'\t' read -r deployed_revision revision_url <<< "$revision_target"
+
+    wait_for_revision_ready "$revision_url" "$temp_var_dir"
+    promote_revision "$service_name" "$deployed_revision"
+
+    log_info "✓ $service_name deployed successfully ($deployed_revision)"
 
     local service_url
     service_url=$(gcloud run services describe "$service_name" --region="$GE_GCP_REGION" --format="value(status.url)")
     log_info "Service URL: $service_url"
 }
 
-# A rollback (scripts/rollback.sh) pins traffic to a named revision, which takes
-# LATEST out of the traffic split — after that, deploying would create a
-# perfectly healthy revision that serves nothing. Resetting to LATEST here makes
-# "deploy the fix" the way out of a rolled-back state, with no extra step to
-# remember. On a normal deploy this is a no-op. It runs only after the deploy
-# above succeeded, so a failed build leaves traffic where the rollback put it.
-reset_traffic_to_latest() {
+cleanup_deployment() {
     local service_name="$1"
+    local revision_tag="$2"
+    local temp_var_dir="$3"
 
-    log_info "Pointing traffic at the latest revision..."
+    # Tagged revisions can retain minimum instances even with no traffic.
+    # Remove only our temporary tag, including when readiness fails.
+    if ! gcloud run services update-traffic "$service_name" \
+        --region="$GE_GCP_REGION" \
+        --project="$GE_GCP_PROJECT_ID" \
+        --remove-tags="$revision_tag" \
+        --quiet > /dev/null; then
+        log_warn "Could not remove temporary tag '$revision_tag' from $service_name."
+    fi
+    rm -rf "$temp_var_dir"
+}
+
+wait_for_revision_ready() {
+    local revision_url="$1"
+    local temp_var_dir="$2"
+    local api_key
+
+    if ! api_key=$(gcloud secrets versions access latest \
+        --secret="inference-api-key-$GE_ENVIRONMENT" \
+        --project="$GE_GCP_PROJECT_ID") || [ -z "$api_key" ]; then
+        log_error "Could not read the inference API key for /ready. Traffic has not been promoted."
+        return 1
+    fi
+
+    # Keep the key out of curl's command line and deployment logs. mktemp -d
+    # makes this directory private, and the EXIT trap removes it on any outcome.
+    printf 'X-API-Key: %s\n' "$api_key" > "$temp_var_dir/ready-header"
+    unset api_key
+
+    log_info "Waiting up to ${READY_TIMEOUT_SEC}s for $revision_url/ready..."
+    local deadline=$((SECONDS + READY_TIMEOUT_SEC))
+    local http_status remaining request_timeout pause
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            break
+        fi
+        request_timeout=$remaining
+        if [ "$request_timeout" -gt 30 ]; then
+            request_timeout=30
+        fi
+
+        if http_status=$(curl --silent --show-error \
+            --max-time "$request_timeout" \
+            --header "@$temp_var_dir/ready-header" \
+            --output "$temp_var_dir/ready-response" \
+            --write-out '%{http_code}' \
+            "$revision_url/ready" 2> "$temp_var_dir/ready-curl-error"); then
+            if [ "$http_status" = "200" ]; then
+                log_info "✓ New revision's models and author maps are ready"
+                return 0
+            fi
+            if [ "$http_status" = "401" ] || [ "$http_status" = "403" ]; then
+                log_error "/ready authentication failed (HTTP $http_status). Traffic has not been promoted."
+                cat "$temp_var_dir/ready-response"
+                return 1
+            fi
+        fi
+
+        remaining=$((deadline - SECONDS))
+        if [ "$remaining" -le 0 ]; then
+            break
+        fi
+        pause=$remaining
+        if [ "$pause" -gt 5 ]; then
+            pause=5
+        fi
+        sleep "$pause"
+    done
+
+    log_error "New revision did not become ready within ${READY_TIMEOUT_SEC}s (last HTTP status: ${http_status:-none}). Traffic has not been promoted."
+    log_error "Last /ready response and connection error:"
+    cat "$temp_var_dir/ready-response" "$temp_var_dir/ready-curl-error" 2>/dev/null || true
+    return 1
+}
+
+# Promote the exact revision that passed /ready. LATEST could have changed
+# during a concurrent deployment. This also replaces a previous rollback pin.
+promote_revision() {
+    local service_name="$1"
+    local revision="$2"
+
+    log_info "Pointing traffic at verified revision $revision..."
 
     if ! gcloud run services update-traffic "$service_name" \
         --region="$GE_GCP_REGION" \
         --project="$GE_GCP_PROJECT_ID" \
-        --to-latest \
+        --to-revisions="$revision=100" \
         --quiet > /dev/null; then
-        log_error "Deployed successfully, but could not point traffic at the new revision."
-        log_error "The previous revision is still serving. Retry with:"
-        log_error "  gcloud run services update-traffic $service_name --region=$GE_GCP_REGION --to-latest"
+        log_error "Readiness passed, but could not point traffic at $revision."
+        log_error "Check the current traffic allocation before retrying:"
+        log_error "  gcloud run services update-traffic $service_name --region=$GE_GCP_REGION --project=$GE_GCP_PROJECT_ID --to-revisions=$revision=100"
         exit 1
     fi
 }
@@ -592,4 +701,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-main
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main
+fi
