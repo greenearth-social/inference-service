@@ -91,6 +91,10 @@ def _install_stub_modules() -> None:
             def tolist(self):
                 return self.value
 
+            def sort(self, descending=False):
+                indices = sorted(range(len(self.value)), key=self.value.__getitem__, reverse=descending)
+                return DummyTensor([self.value[idx] for idx in indices]), DummyTensor(indices)
+
             def __getitem__(self, idx):
                 if isinstance(idx, DummyTensor):
                     def _flatten(value):
@@ -206,6 +210,7 @@ def _install_stub_modules() -> None:
         torch.isfinite = lambda tensor: tensor._map(math.isfinite)
         torch.isposinf = lambda tensor: tensor._map(lambda value: math.isinf(value) and value > 0)
         torch.isneginf = lambda tensor: tensor._map(lambda value: math.isinf(value) and value < 0)
+        torch.sigmoid = lambda tensor: tensor._map(lambda value: 1.0 / (1.0 + math.exp(-value)))
         torch.where = where
         torch.ones = lambda shape, dtype=None, device=None: DummyTensor(shape)
         torch.inference_mode = inference_mode
@@ -1107,7 +1112,7 @@ def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_input
     assert captured["model_inputs"]["candidate_author_indices"] == [13, app_request.AUTHOR_UNK_IDX]
     assert captured["model_inputs"]["history_prior_cumulative_likes"] == [[10, 0]]
     assert captured["model_inputs"]["candidate_prior_cumulative_likes"] == [30, 40]
-    assert out.tolist() == [1.0, 0.0]
+    assert out.tolist() == pytest.approx([0.6791786992, 0.6224593312])
 
 
 def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_request, monkeypatch):
@@ -1157,7 +1162,7 @@ def test_predict_with_entry_ranker_defaults_missing_author_dids_to_unknown(app_r
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX]
     assert captured["history_prior_cumulative_likes"] == [[0, 0, 0]]
     assert captured["candidate_prior_cumulative_likes"] == [0]
-    assert out.tolist() == [0.5]
+    assert out.tolist() == pytest.approx([0.5621765009])
 
 
 def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candidates(app_request, monkeypatch):
@@ -1208,7 +1213,38 @@ def test_predict_with_entry_ranker_scores_empty_history_against_multiple_candida
     assert captured["candidate_author_indices"] == [app_request.AUTHOR_UNK_IDX, app_request.AUTHOR_UNK_IDX]
     assert captured["history_prior_cumulative_likes"] == [[0, 0, 0]]
     assert captured["candidate_prior_cumulative_likes"] == [0, 0]
-    assert out.tolist() == [0.0, 1.0]
+    assert out.tolist() == pytest.approx([0.5621765009, 0.6791786992])
+
+
+def test_predict_with_entry_ranker_probabilities_do_not_depend_on_other_candidate_logits(app_request, monkeypatch):
+    monkeypatch.setattr(app_request, "_author_idx_maps", {})
+    entry = app_request.LoadedModel(model_type="ranker")
+    entry.module = Mock()
+    entry.module.score_candidate_matrix.side_effect = [
+        app_request.torch.Tensor([[2.0]]),
+        app_request.torch.Tensor([[-2.0, 0.0, 2.0]]),
+    ]
+    entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 3
+
+    single_candidate = app_request.RankerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0]],
+        history_liked_at_times=[_liked_at(1)],
+        candidate_post_embeddings=[[3.0, 2.0, 1.0]],
+    )
+    multiple_candidates = app_request.RankerPredictRequest(
+        history_embeddings=[[9.0, 8.0, 7.0]],
+        history_liked_at_times=[_liked_at(1)],
+        candidate_post_embeddings=[[7.0, 8.0, 9.0], [4.0, 5.0, 6.0], [3.0, 2.0, 1.0]],
+    )
+
+    single_scores = app_request._predict_with_entry(entry, single_candidate).tolist()
+    multiple_scores = app_request._predict_with_entry(entry, multiple_candidates).tolist()
+
+    # BCE logits have absolute probabilities; adding candidates must not rescale them.
+    assert single_scores == pytest.approx([0.8807970780])
+    assert multiple_scores == pytest.approx([0.1192029220, 0.5, 0.8807970780])
+    assert single_scores[0] == multiple_scores[2]
 
 
 def test_ranker_request_rejects_liked_at_length_mismatch(app_request):
