@@ -1094,9 +1094,7 @@ def _predict_with_entry(entry: LoadedModel, req: PredictRequest) -> Any:
                     candidate_post_embeddings, history_author_indices, candidate_author_indices,
                     history_prior_cumulative_likes, candidate_prior_cumulative_likes
                 )
-                # logger.info("Ranker model output logits: %s", y[0].detach().cpu().tolist())
-                probs = torch.sigmoid(y[0])
-                # logger.info("Ranker model output probabilities sorted: %s", probs.sort(descending=True)[0].detach().cpu().tolist())
+                probs = torch.sigmoid(y[0]).nan_to_num(nan=0.0)
                 return probs
             case _:
                 assert_never(entry.model_type)

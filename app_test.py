@@ -69,6 +69,9 @@ def _install_stub_modules() -> None:
             def clone(self):
                 return self._map(lambda value: value)
 
+            def nan_to_num(self, nan=0.0):
+                return self._map(lambda value: nan if math.isnan(value) else value)
+
             def dim(self):
                 def _dim(v):
                     if isinstance(v, list) and v:
@@ -1245,6 +1248,29 @@ def test_predict_with_entry_ranker_probabilities_do_not_depend_on_other_candidat
     assert single_scores == pytest.approx([0.8807970780])
     assert multiple_scores == pytest.approx([0.1192029220, 0.5, 0.8807970780])
     assert single_scores[0] == multiple_scores[2]
+
+
+def test_predict_model_ranker_replaces_nan_with_zero_and_bounds_infinities(app_request, monkeypatch):
+    monkeypatch.setattr(app_request, "GE_INFERENCE_MAX_BATCH", 4)
+    entry = app_request.LoadedModel(model_type="ranker")
+    entry.module = Mock()
+    entry.module.score_candidate_matrix.return_value = app_request.torch.Tensor(
+        [[float("nan"), float("-inf"), 0.0, float("inf")]]
+    )
+    entry.device = app_request.torch.device("cpu")
+    entry.max_history_len = 3
+    monkeypatch.setattr(app_request, "_get_entry_or_404", lambda _name: entry)
+    req = app_request.RankerPredictRequest(
+        history_embeddings=[],
+        history_liked_at_times=[],
+        candidate_post_embeddings=[[1.0, 2.0, 3.0] for _ in range(4)],
+    )
+
+    response = app_request.predict_model("ranker", req)
+
+    assert response["outputs"] == [0.0, 0.0, 0.5, 1.0]
+    # Non-finite model outputs must not prevent the whole response from being serialized.
+    assert app_request.JSONResponse(response).status_code == 200
 
 
 def test_ranker_request_rejects_liked_at_length_mismatch(app_request):
