@@ -228,9 +228,17 @@ Or with multiple candidates:
 Ranker requests may use `history_embeddings: []` or `history_embeddings: [[]]`
 for an empty single-user history. They do not accept batched user histories.
 Ranker responses are flat lists of candidate scores, one score per candidate.
-Scores are request-relative normalized ranker outputs in `[0, 1]`, where
-higher is better. Tied or otherwise degenerate ranker logits produce neutral
-`0.5` scores.
+Scores are computed as `sigmoid(logit)` in `[0, 1]`, where higher is better.
+Each candidate's logit is converted independently, so adding other candidates
+does not rescale its score. A zero logit produces `0.5`; tied logits retain
+their shared sigmoid value. After sigmoid, NaNs are replaced with `0.0`.
+Negative and positive infinite logits produce `0.0` and `1.0`, respectively.
+
+This probability interpretation assumes a ranker trained with
+`binary_cross_entropy_with_logits` that exports raw logits; the service applies
+sigmoid once. The scores estimate probabilities under the training distribution.
+Because training uses sampled negatives, they are not automatically calibrated
+probabilities of a user liking a post when shown it.
 
 ## Running Tests
 
