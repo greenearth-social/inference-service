@@ -291,6 +291,36 @@ Optional flags:
 - `--inference-domain <domain>`: use a custom host
 - `--disable-domain-mapping`: skip mapping/DNS setup
 
+### Promoting a ranker
+
+After reviewing a training run and manually testing its predictions in stage,
+promote its files from the stage bucket to the production bucket:
+
+```bash
+pipenv run python scripts/promote_model.py "<run-folder>"
+```
+
+The folder is the path beneath `Engagement Prediction/` in
+`gs://greenearth-471522-engagement-prediction-model-stage`. The destination is the
+same folder in `gs://greenearth-471522-engagement-prediction-model-prod`. The script
+uses Google Application Default Credentials with read access to stage and read/write
+access to prod.
+
+Promotion requires the ranker, author map, model config, and serving manifest. It
+copies the whole run folder, verifies the destination ranker, author map, and
+config sizes and checksums, then writes and verifies the manifest with its model
+URI pointing to prod. The config is also needed by future automated comparisons
+against the production model.
+
+On success, the script prints the production manifest URI, author-map URI,
+history length, and original ClearML run/model IDs. Use the printed settings for
+the separate manual deployment below. Promotion does not deploy the service or
+run prediction checks.
+
+Existing destination files can be overwritten. A failed promotion can leave
+copied files (and a manifest from an earlier promotion) in prod; fix the error
+and rerun the command before deploying.
+
 ### Deploying the Service
 
 Deploy to Cloud Run:
