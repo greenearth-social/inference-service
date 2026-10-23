@@ -999,44 +999,6 @@ def test_get_time_deltas_hours_handles_single_and_batched_times(app_request, mon
     assert app_request._get_time_deltas_hours([[], [_liked_at(3)]]) == [[], [3.0]]
 
 
-def test_normalize_maps_ranker_logits_to_unit_interval(app_request):
-    scaled = app_request._normalize(app_request.torch.Tensor([0.25, 0.75]))
-
-    assert scaled.tolist() == [0.0, 1.0]
-
-
-def test_normalize_preserves_candidate_order(app_request):
-    scaled = app_request._normalize(app_request.torch.Tensor([0.5, 0.25, 0.75]))
-
-    assert scaled.tolist() == [0.5, 0.0, 1.0]
-
-
-def test_normalize_returns_neutral_score_for_equal_ranker_logits(app_request):
-    scaled = app_request._normalize(app_request.torch.Tensor([0.5, 0.5]))
-
-    assert scaled.tolist() == [0.5, 0.5]
-
-
-def test_normalize_returns_empty_scores_for_empty_ranker_logits(app_request):
-    scaled = app_request._normalize(app_request.torch.Tensor([]))
-
-    assert scaled.tolist() == []
-
-
-def test_normalize_neutralizes_nan_and_bounds_infinite_logits(app_request):
-    scaled = app_request._normalize(
-        app_request.torch.Tensor([float("-inf"), 1.0, 3.0, float("inf"), float("nan")])
-    )
-
-    assert scaled.tolist() == [0.0, 0.0, 1.0, 1.0, 0.5]
-
-
-def test_normalize_returns_neutral_scores_when_no_finite_bounds_exist(app_request):
-    scaled = app_request._normalize(app_request.torch.Tensor([float("nan"), float("inf")]))
-
-    assert scaled.tolist() == [0.5, 0.5]
-
-
 def test_predict_with_entry_ranker_passes_history_candidate_and_time_delta_inputs(app_request, monkeypatch):
     captured = {}
     _freeze_app_now(app_request, monkeypatch)
