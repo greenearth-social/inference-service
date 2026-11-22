@@ -1645,3 +1645,75 @@ def test_health_reports_no_git_sha_when_unstamped(app_request, monkeypatch):
     result = app_request.health()
 
     assert result == {"ok": True, "git_sha": None}
+
+
+def _b64_rows(rows: list[list[float]]) -> list[str]:
+    import base64
+    import struct
+
+    return [base64.b64encode(struct.pack(f"<{len(row)}f", *row)).decode() for row in rows]
+
+
+def test_ranker_request_accepts_compact_embeddings_identically(app_request):
+    history = [[0.5, -1.25, 3.0], [4.0, 5.5, -6.0]]
+    candidates = [[7.0, 8.0, 9.0], [0.125, 11.0, 12.0]]
+    common = dict(
+        history_author_dids=["author-1", "author-2"],
+        history_liked_at_times=[_liked_at(1), _liked_at(2)],
+        candidate_author_dids=["candidate-1", "candidate-2"],
+    )
+
+    compact = app_request.RankerPredictRequest.model_validate(
+        {
+            **common,
+            "history_embeddings_b64": _b64_rows(history),
+            "candidate_post_embeddings_b64": _b64_rows(candidates),
+        }
+    )
+    plain = app_request.RankerPredictRequest(
+        history_embeddings=history, candidate_post_embeddings=candidates, **common
+    )
+
+    assert compact == plain
+
+
+def test_user_tower_request_accepts_compact_history(app_request):
+    history = [[0.5, -1.25, 3.0]]
+    request = app_request.UserTowerPredictRequest.model_validate(
+        {"history_embeddings_b64": _b64_rows(history), "history_author_dids": ["author-1"]}
+    )
+
+    assert request.history_embeddings == history
+
+
+def test_predict_request_routes_compact_bodies_to_the_right_model(app_request):
+    from pydantic import TypeAdapter
+
+    adapter = TypeAdapter(app_request.PredictRequest)
+    ranker = adapter.validate_python(
+        {
+            "history_embeddings_b64": [],
+            "history_liked_at_times": [],
+            "candidate_post_embeddings_b64": _b64_rows([[1.0, 2.0, 3.0]]),
+        }
+    )
+    user_tower = adapter.validate_python({"history_embeddings_b64": _b64_rows([[1.0, 2.0, 3.0]])})
+
+    assert isinstance(ranker, app_request.RankerPredictRequest)
+    assert isinstance(user_tower, app_request.UserTowerPredictRequest)
+
+
+def test_compact_request_rejects_both_encodings_of_one_field(app_request):
+    with pytest.raises(ValueError, match="either history_embeddings or history_embeddings_b64"):
+        app_request.UserTowerPredictRequest.model_validate(
+            {
+                "history_embeddings": [[1.0, 2.0, 3.0]],
+                "history_embeddings_b64": _b64_rows([[1.0, 2.0, 3.0]]),
+            }
+        )
+
+
+@pytest.mark.parametrize("rows", [["not base64!"], ["AAAA" + "AA=="], [1.0]])
+def test_compact_request_rejects_malformed_rows(app_request, rows):
+    with pytest.raises(ValueError, match="history_embeddings_b64"):
+        app_request.UserTowerPredictRequest.model_validate({"history_embeddings_b64": rows})

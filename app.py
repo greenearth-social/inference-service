@@ -1,3 +1,4 @@
+import base64
 import os
 import threading
 import time
@@ -10,6 +11,7 @@ from typing import Any, Literal, Annotated, assert_never, get_args
 from urllib.parse import urlparse
 import logging
 
+import numpy as np
 import torch
 from clearml import Model
 from fastapi import FastAPI, HTTPException, Security, Body
@@ -342,10 +344,58 @@ def _validate_post_embeddings(
             return 1
 
 
+# Compact embedding encoding. Callers may send an embedding matrix as a list of
+# rows, each the base64 of little-endian float32 values, under the field name
+# with a ``_b64`` suffix. JSON floats cost ~19 bytes and a float->text->float
+# round trip each; this is ~5.3 bytes and a memcpy. Decoded float32 values are
+# exactly representable as Python floats, so results are identical to sending
+# the same float32 values as JSON. Only the single-user [T, D] and [B, D] forms
+# are supported.
+_COMPACT_EMBEDDING_FIELDS = (
+    ("history_embeddings_b64", "history_embeddings"),
+    ("candidate_post_embeddings_b64", "candidate_post_embeddings"),
+)
+
+
+def _decode_b64_rows(rows: Any, field: str) -> list[list[float]]:
+    if not isinstance(rows, list) or not all(isinstance(row, str) for row in rows):
+        raise ValueError(f"{field} must be a list of base64 strings")
+    decoded: list[list[float]] = []
+    for row in rows:
+        try:
+            raw = base64.b64decode(row, validate=True)
+        except ValueError as exc:
+            raise ValueError(f"{field} contains invalid base64") from exc
+        if len(raw) % 4 != 0:
+            raise ValueError(f"{field} rows must be whole float32 values")
+        decoded.append(np.frombuffer(raw, dtype="<f4").astype(float).tolist())
+    return decoded
+
+
+def _expand_compact_embeddings(data: Any) -> Any:
+    """Replace any ``*_b64`` embedding field with its decoded float form."""
+    if not isinstance(data, dict):
+        return data
+    for compact, full in _COMPACT_EMBEDDING_FIELDS:
+        if compact not in data:
+            continue
+        if full in data:
+            raise ValueError(f"send either {full} or {compact}, not both")
+        rows = data[compact]
+        data = {key: value for key, value in data.items() if key != compact}
+        data[full] = _decode_b64_rows(rows, compact)
+    return data
+
+
 class UserTowerPredictRequest(BaseModel):
     # history_embeddings: [T, D] or [B, T, D]
     history_embeddings: list[list[float]] | list[list[list[float]]]
     history_author_dids: list[str] | list[list[str]] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _expand_compact(cls, data: Any) -> Any:
+        return _expand_compact_embeddings(data)
 
     @model_validator(mode="after")
     def _validate_history(self) -> "UserTowerPredictRequest":
@@ -375,6 +425,11 @@ class RankerPredictRequest(BaseModel):
     candidate_post_embeddings: list[float] | list[list[float]]
     candidate_author_dids: str | list[str] | None = None
     candidate_prior_cumulative_likes: int | list[int] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _expand_compact(cls, data: Any) -> Any:
+        return _expand_compact_embeddings(data)
 
     @model_validator(mode="after")
     def _validate_post_inputs(self) -> "RankerPredictRequest":
@@ -408,11 +463,15 @@ class RankerPredictRequest(BaseModel):
 
 def _predict_request_discriminator(value: Any) -> str:
     if isinstance(value, dict):
-        if "history_embeddings" in value and "candidate_post_embeddings" in value:
+        has_history = "history_embeddings" in value or "history_embeddings_b64" in value
+        has_candidates = (
+            "candidate_post_embeddings" in value or "candidate_post_embeddings_b64" in value
+        )
+        if has_history and has_candidates:
             return "ranker"
         if "post_embeddings" in value:
             return "post-tower"
-        if "history_embeddings" in value:
+        if has_history:
             return "user-tower"
     raise ValueError("Request must contain one of: 'post_embeddings' or 'history_embeddings'.")
 
